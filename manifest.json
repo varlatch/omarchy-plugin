@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "id": "varlatch",
+  "name": "Varlatch",
+  "version": "0.1.0",
+  "author": "Varlatch",
+  "license": "Apache-2.0",
+  "description": "Varlatch sessions in the Omarchy bar: which servers you hold credentials for, when they expire, and quick sign-in and sign-out, all read offline from `varlatch status --json`.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Varlatch",
+    "description": "Stored Varlatch credentials and their expiry; click for login/logout actions.",
+    "category": "Development",
+    "aliases": [
+      "vlt",
+      "secrets"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30,
+      "varlatchCommand": "varlatch",
+      "notifyExpiry": "on",
+      "showWhenLoggedOut": "on",
+      "showLocalhost": "off"
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 15,
+        "max": 3600,
+        "step": 15,
+        "defaultValue": 30
+      },
+      {
+        "key": "varlatchCommand",
+        "type": "string",
+        "label": "varlatch command",
+        "defaultValue": "varlatch"
+      },
+      {
+        "key": "notifyExpiry",
+        "type": "enum",
+        "label": "Notify on expiring credentials",
+        "options": [
+          "on",
+          "off"
+        ],
+        "defaultValue": "on"
+      },
+      {
+        "key": "showWhenLoggedOut",
+        "type": "enum",
+        "label": "Show widget when logged out",
+        "options": [
+          "on",
+          "off"
+        ],
+        "defaultValue": "on"
+      },
+      {
+        "key": "showLocalhost",
+        "type": "enum",
+        "label": "Show localhost sessions",
+        "options": [
+          "on",
+          "off"
+        ],
+        "defaultValue": "off"
+      }
+    ]
+  }
+}

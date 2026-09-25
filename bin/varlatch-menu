@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+# Menu actions for the Varlatch omarchy plugin. Every read goes through
+# `varlatch status --json` (offline); the only network actions are the ones
+# the user explicitly clicks (login, logout, verify).
+set -euo pipefail
+
+SHELL_JSON="$HOME/.config/omarchy/shell.json"
+
+# Honor a varlatchCommand override configured on the bar widget.
+varlatch_cmd() {
+  local override=""
+  if [ -f "$SHELL_JSON" ]; then
+    override=$(jq -r '[.bar.layout[]?[]? | select(.id == "varlatch") | .varlatchCommand] | map(select(. != null)) | first // empty' "$SHELL_JSON" 2>/dev/null || true)
+  fi
+  echo "${override:-varlatch}"
+}
+
+CMD=$(varlatch_cmd)
+STATE_DIR="$HOME/.local/state/varlatch-omarchy"
+STATE_FILE="$STATE_DIR/servers.json"
+LOGIN_FILE="$STATE_DIR/login.json"
+
+# A browser sign-in started by `login` is still waiting on its callback.
+login_running() {
+  local pid
+  pid=$(jq -r 'select(.state == "pending") | .pid // empty' "$LOGIN_FILE" 2>/dev/null || true)
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+status_json() { eval "$CMD status --json" 2>/dev/null; }
+
+# Localhost dev servers are hidden unless the widget's showLocalhost
+# setting turns them on; either way a real deployment is preferred.
+show_localhost() {
+  [ -f "$SHELL_JSON" ] || return 1
+  [ "$(jq -r '[.bar.layout[]?[]? | select(.id == "varlatch") | .showLocalhost] | map(select(. != null)) | first // "off"' "$SHELL_JSON" 2>/dev/null)" = "on" ]
+}
+if show_localhost; then
+  prefer_live='sort_by(if test("^[a-z]+://(localhost|127\\.)") then 1 else 0 end) | first // empty'
+else
+  prefer_live='map(select(test("^[a-z]+://(localhost|127\\.)") | not)) | first // empty'
+fi
+
+# Currently stored server, live one first.
+first_server() { status_json | jq -r ".servers | map(.server) | $prefer_live"; }
+
+# Login target even after a full logout: current store, then the servers we
+# last saw (sync-menu remembers them), then the environment.
+login_server() {
+  local s
+  s=$(first_server)
+  [ -z "$s" ] && [ -f "$STATE_FILE" ] && s=$(jq -r "$prefer_live" "$STATE_FILE" 2>/dev/null || true)
+  [ -z "$s" ] && s="${VARLATCH_SERVER:-}"
+  echo "$s"
+}
+
+refresh_widget() { omarchy-shell varlatch refresh >/dev/null 2>&1 || true; }
+
+notify() { notify-send -a Varlatch "Varlatch" "$1"; }
+
+case "${1:-}" in
+  has-credentials)
+    if show_localhost; then
+      status_json | jq -e '.servers | length > 0' >/dev/null
+    else
+      status_json | jq -e '[.servers[].server | select(test("^[a-z]+://(localhost|127\\.)") | not)] | length > 0' >/dev/null
+    fi
+    ;;
+
+  status-notify)
+    out=$(eval "$CMD status" 2>&1) || { notify "status failed: $out"; exit 1; }
+    notify "$out"
+    ;;
+
+  verify)
+    # The one explicitly network-touching read: --probe checks each stored
+    # credential against its server.
+    out=$(eval "$CMD status --probe --json" 2>&1) \
+      || { notify "verify failed: $out"; exit 1; }
+    summary=$(echo "$out" | jq -r '.servers[] | "\(.server): \(.probe.state // "unknown")\(if .probe.detail then " (\(.probe.detail))" else "" end)"')
+    notify "${summary:-no stored credentials}"
+    refresh_widget
+    ;;
+
+  login)
+    server="${2:-$(login_server)}"
+    if [ -z "$server" ]; then
+      notify "No server known. Run once in a terminal: varlatch login --server <url>"
+      exit 1
+    fi
+    # Browser-handoff flow, no terminal: the CLI opens the browser itself
+    # and never reads stdin. The pending sign-in (server, fallback URL, pid)
+    # goes to $LOGIN_FILE, which the panel watches to offer "open link" /
+    # "cancel"; the outcome arrives as a notification.
+    mkdir -p "$STATE_DIR"
+    if login_running; then
+      # One sign-in at a time: a second click re-opens the pending link.
+      url=$(jq -r '.url // empty' "$LOGIN_FILE")
+      [ -n "$url" ] && xdg-open "$url" >/dev/null 2>&1 &
+      exit 0
+    fi
+    log=$(mktemp)
+    trap 'rm -f "$log"; echo "{\"state\":\"idle\"}" > "$LOGIN_FILE"; refresh_widget' EXIT
+    # Own session, so cancel can signal the whole process group.
+    setsid bash -c "exec $CMD login --server '$server'" >"$log" 2>&1 </dev/null &
+    cli=$!
+    write_login() {
+      jq -n --arg s "$server" --arg u "$1" --argjson p "$cli" \
+        '{state: "pending", server: $s, url: $u, pid: $p}' > "$LOGIN_FILE"
+    }
+    write_login ""
+    url=""
+    while kill -0 "$cli" 2>/dev/null; do
+      if [ -z "$url" ]; then
+        url=$(grep -m1 -oE 'https?://[^ ]+/enroll\?[^ ]+' "$log" || true)
+        [ -n "$url" ] && write_login "$url"
+      fi
+      sleep 0.3
+    done
+    rc=0; wait "$cli" || rc=$?
+    host=${server#*://}; host=${host%%/*}
+    if [ "$rc" -eq 0 ]; then
+      # Surface a failed revoke of the replaced credential, if any.
+      warn=$(grep '^varlatch:' "$log" || true)
+      notify "Logged in to $host.${warn:+ $warn}"
+    elif [ "$rc" -eq 143 ]; then
+      notify "Sign-in to $host cancelled."
+    else
+      notify-send -a Varlatch -u critical "Varlatch" \
+        "Sign-in to $host failed: $(grep -v '^ ' "$log" | tail -n 2 | tr '\n' ' ')"
+    fi
+    ;;
+
+  login-cancel)
+    login_running || exit 0
+    pid=$(jq -r '.pid' "$LOGIN_FILE")
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    ;;
+
+  notify-session)
+    # Expiry notification with an action button: "Renew now" while the
+    # session is still live (login replaces and revokes the old credential
+    # only once the new one is saved), "Log in" once it has expired.
+    server="${2:?server}"; state="${3:?state}"; msg="${4:?message}"
+    if [ "$state" = "expired" ]; then urgency=critical; label="Log in"
+    else urgency=normal; label="Renew now"; fi
+    choice=$(notify-send -a Varlatch -u "$urgency" -A "login=$label" --wait "Varlatch" "$msg" || true)
+    [ "$choice" = "login" ] && exec "$0" login "$server"
+    ;;
+
+  logout)
+    server_flag=""
+    [ -n "${2:-}" ] && server_flag=" --server $2"
+    out=$(eval "$CMD logout$server_flag" 2>&1) || { notify "$out"; refresh_widget; exit 1; }
+    notify "$out"
+    refresh_widget
+    ;;
+
+  web)
+    server=$(first_server)
+    [ -n "$server" ] || { notify "No stored server."; exit 1; }
+    xdg-open "$server" >/dev/null 2>&1 &
+    ;;
+
+  refresh)
+    refresh_widget
+    ;;
+
+  sync-menu)
+    # Regenerate this plugin's managed block in omarchy-menu.jsonc from the
+    # current session state, so the submenu shows what you are logged in to
+    # and offers only the actions that make sense. The menu hot-reloads the
+    # file; we only rewrite (and refresh) when the content actually changed.
+    VARLATCH_MENU_CMD="$CMD" VARLATCH_SHOW_LOCALHOST="$(show_localhost && echo on || echo off)" python3 - <<'PY'
+import json, os, re, subprocess, sys
+from datetime import datetime, timezone
+
+home = os.path.expanduser("~")
+menu_path = os.path.join(home, ".config/omarchy/extensions/omarchy-menu.jsonc")
+bin_path = os.path.join(home, ".config/omarchy/plugins/varlatch/bin/varlatch-menu")
+cmd = os.environ["VARLATCH_MENU_CMD"]
+
+try:
+    out = subprocess.run(["bash", "-lc", f"{cmd} status --json"],
+                         capture_output=True, text=True, timeout=15)
+    doc = json.loads(out.stdout) if out.returncode == 0 else {"servers": []}
+except Exception:
+    doc = {"servers": []}
+servers = doc.get("servers") or []
+
+state_file = os.path.join(home, ".local/state/varlatch-omarchy/servers.json")
+def not_local(u): return not re.match(r"^[a-z]+://(localhost|127\.)", str(u))
+if os.environ.get("VARLATCH_SHOW_LOCALHOST") != "on":
+    servers = [s for s in servers if not_local(s["server"])]
+
+# Remember servers across logouts so "Log in" keeps a target.
+if servers:
+    os.makedirs(os.path.dirname(state_file), exist_ok=True)
+    with open(state_file, "w", encoding="utf-8") as f:
+        json.dump([s["server"] for s in servers], f)
+remembered = []
+try:
+    remembered = json.load(open(state_file, encoding="utf-8"))
+except Exception:
+    pass
+if os.environ.get("VARLATCH_SHOW_LOCALHOST") != "on":
+    remembered = [u for u in remembered if not_local(u)]
+remembered = sorted(remembered, key=lambda u: 0 if not_local(u) else 1)
+
+def host(url):
+    return re.sub(r"/.*$", "", re.sub(r"^[a-z]+://", "", str(url)))
+
+def left(s, now):
+    exp = s.get("expiresAt")
+    if not exp:
+        return "no expiry recorded"
+    try:
+        dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+    except ValueError:
+        return "no expiry recorded"
+    ms = (dt - now).total_seconds()
+    if ms <= 0:
+        return "EXPIRED"
+    h, m = int(ms // 3600), int(ms % 3600 // 60)
+    return (f"{h}h {m}m left" if h else f"{m}m left")
+
+now = datetime.now(timezone.utc)
+expired = [s for s in servers if s.get("expired") is True]
+live = [s for s in servers if s.get("expired") is not True]
+
+if not servers:
+    root_desc = "Not logged in"
+elif len(servers) == 1:
+    s = servers[0]
+    root_desc = f"{host(s['server'])} — {left(s, now)}"
+else:
+    root_desc = f"{len(live)}/{len(servers)} sessions live"
+
+entries = [("varlatch", {"icon": "", "label": "Varlatch", "description": root_desc})]
+for i, s in enumerate(servers):
+    entries.append((f"varlatch.session{i}", {
+        "icon": "",
+        "label": host(s["server"]),
+        "description": "Logged in — " + left(s, now) if s.get("expired") is not True
+            else "Session EXPIRED — log in again",
+        "action": f"{bin_path} status-notify",
+    }))
+if not servers or expired:
+    label = "Log in" if not live else "Log in again"
+    target = (expired[0]["server"] if expired
+              else servers[0]["server"] if servers
+              else remembered[0] if remembered else "")
+    entry = {"icon": "", "label": label, "description": "Browser passkey sign-in",
+             "action": f"{bin_path} login" + (f" {target}" if target else "")}
+    entries.append(("varlatch.login", entry))
+# Any live session can be renewed: a login to the same server, which
+# revokes the old credential once the new one is saved.
+for i, s in enumerate(live):
+    entries.append((f"varlatch.renew{i}", {"icon": "",
+        "label": "Renew session" if len(live) == 1 else f"Renew {host(s['server'])}",
+        "description": f"{host(s['server'])} — {left(s, now)} · browser passkey sign-in",
+        "action": f"{bin_path} login {s['server']}"}))
+if servers:
+    if len(servers) == 1:
+        # Always name the server: the store may hold hidden (localhost)
+        # entries the CLI would otherwise ask to disambiguate.
+        entries.append(("varlatch.logout", {"icon": "", "label": "Log out",
+            "description": "Revoke server-side and remove locally",
+            "action": f"{bin_path} logout {servers[0]['server']}"}))
+    else:
+        for i, s in enumerate(servers):
+            entries.append((f"varlatch.logout{i}", {"icon": "",
+                "label": f"Log out {host(s['server'])}",
+                "action": f"{bin_path} logout {s['server']}"}))
+    entries.append(("varlatch.verify", {"icon": "", "label": "Verify credentials",
+        "description": "Probe each stored credential against its server",
+        "action": f"{bin_path} verify"}))
+    entries.append(("varlatch.web", {"icon": "", "label": "Open dashboard",
+        "action": f"{bin_path} web"}))
+entries.append(("varlatch.status", {"icon": "", "label": "Show full status",
+    "action": f"{bin_path} status-notify"}))
+
+body = ",\n".join(f'  "{k}": {json.dumps(v, ensure_ascii=False)}' for k, v in entries)
+block = ("// >>> varlatch plugin (managed block; regenerated by varlatch-menu sync-menu)\n"
+         + body + "\n// <<< varlatch plugin")
+
+raw = open(menu_path, encoding="utf-8").read()
+new = re.sub(r"// >>> varlatch plugin.*?// <<< varlatch plugin", block, raw, count=1, flags=re.S)
+if new == raw:
+    sys.exit(0)
+open(menu_path, "w", encoding="utf-8").write(new)
+subprocess.run(["omarchy", "menu", "refresh"], capture_output=True)
+PY
+    ;;
+
+  *)
+    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-cancel|logout [server]|web|refresh|sync-menu>" >&2
+    exit 1
+    ;;
+esac
