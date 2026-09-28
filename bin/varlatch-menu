@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Menu actions for the Varlatch omarchy plugin. Every read goes through
 # `varlatch status --json` (offline); the only network actions are the ones
-# the user explicitly clicks (login, logout, verify).
+# the user explicitly clicks (login, logout, verify, update) and, with the
+# widget's checkUpdates setting on, a release check at most twice a day.
 set -euo pipefail
 
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
@@ -15,10 +16,23 @@ varlatch_cmd() {
   echo "${override:-varlatch}"
 }
 
+# A widget setting from shell.json, or the given default.
+widget_setting() {
+  local value=""
+  if [ -f "$SHELL_JSON" ]; then
+    value=$(jq -r --arg k "$1" '[.bar.layout[]?[]? | select(.id == "varlatch") | .[$k]] | map(select(. != null)) | first // empty | tostring' "$SHELL_JSON" 2>/dev/null || true)
+  fi
+  echo "${value:-$2}"
+}
+
 CMD=$(varlatch_cmd)
 STATE_DIR="$HOME/.local/state/varlatch-omarchy"
 STATE_FILE="$STATE_DIR/servers.json"
 LOGIN_FILE="$STATE_DIR/login.json"
+UPDATE_FILE="$STATE_DIR/update.json"
+RELEASE_REPO="${VARLATCH_RELEASE_REPO:-varlatch/varlatch}"
+# Seconds between release checks; a failed check retries after an hour.
+UPDATE_TTL=43200
 
 # A browser sign-in started by `login` is still waiting on its callback.
 login_running() {
@@ -31,10 +45,7 @@ status_json() { eval "$CMD status --json" 2>/dev/null; }
 
 # Localhost dev servers are hidden unless the widget's showLocalhost
 # setting turns them on; either way a real deployment is preferred.
-show_localhost() {
-  [ -f "$SHELL_JSON" ] || return 1
-  [ "$(jq -r '[.bar.layout[]?[]? | select(.id == "varlatch") | .showLocalhost] | map(select(. != null)) | first // "off"' "$SHELL_JSON" 2>/dev/null)" = "on" ]
-}
+show_localhost() { [ "$(widget_setting showLocalhost off)" = "on" ]; }
 if show_localhost; then
   prefer_live='sort_by(if test("^[a-z]+://(localhost|127\\.)") then 1 else 0 end) | first // empty'
 else
@@ -57,6 +68,51 @@ login_server() {
 refresh_widget() { omarchy-shell varlatch refresh >/dev/null 2>&1 || true; }
 
 notify() { notify-send -a Varlatch "Varlatch" "$1"; }
+
+# "0.10.1" from `varlatch 0.10.1 (migration 20)`; empty when the CLI is
+# missing or predates --version.
+cli_version() { eval "$CMD --version" 2>/dev/null | sed -nE '1s/^varlatch ([0-9][^ ]*).*/\1/p' || true; }
+
+# How the CLI is installed, which decides whether we may replace it:
+#   release <path>   the single-file release build (varlatch-cli-X.cjs)
+#   checkout <path>  a build inside a source checkout: update with git
+#   custom           a varlatchCommand with arguments, or unrecognized
+#   missing          not on PATH
+cli_install() {
+  case "$CMD" in *[[:space:]]*) echo custom; return ;; esac
+  local path real
+  path=$(command -v "$CMD" 2>/dev/null) || { echo missing; return; }
+  real=$(readlink -f "$path")
+  if git -C "$(dirname "$real")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "checkout $real"
+  elif head -c 400 "$real" 2>/dev/null | grep -q 'Varlatch CLI'; then
+    echo "release $path"
+  else
+    echo custom
+  fi
+}
+
+# Latest published release, without the "v". Unauthenticated first, so it
+# works as soon as the repository is public; until then, through the GitHub
+# CLI when it is signed in.
+latest_release() {
+  local tag=""
+  tag=$(curl -fsS --max-time 10 -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/$RELEASE_REPO/releases/latest" 2>/dev/null | jq -r '.tag_name // empty' 2>/dev/null) || tag=""
+  if [ -z "$tag" ] && command -v gh >/dev/null 2>&1; then
+    tag=$(gh api "repos/$RELEASE_REPO/releases/latest" -q .tag_name 2>/dev/null) || tag=""
+  fi
+  echo "${tag#v}"
+}
+
+# True when version $1 is newer than $2.
+version_gt() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+}
+
+release_url() { echo "https://github.com/$RELEASE_REPO/releases/tag/v$1"; }
+
+refresh_version() { omarchy-shell varlatch refreshVersion >/dev/null 2>&1 || true; }
 
 case "${1:-}" in
   has-credentials)
@@ -164,6 +220,169 @@ case "${1:-}" in
 
   refresh)
     refresh_widget
+    ;;
+
+  version-info)
+    # One JSON line for the widget: the CLI version, how it is installed,
+    # and (checkUpdates on) the latest release, cached in $UPDATE_FILE.
+    # `--force` skips the cache.
+    current=$(cli_version)
+    read -r install install_path <<<"$(cli_install)" || true
+    check=$(widget_setting checkUpdates off)
+    latest=""; checked=0; notified=""
+    if [ -f "$UPDATE_FILE" ]; then
+      latest=$(jq -r '.latest // empty' "$UPDATE_FILE" 2>/dev/null || true)
+      checked=$(jq -r '.checkedAt // 0' "$UPDATE_FILE" 2>/dev/null || echo 0)
+      notified=$(jq -r '.notified // empty' "$UPDATE_FILE" 2>/dev/null || true)
+    fi
+    now=$(date +%s)
+    if [ "$check" = on ] && { [ "${2:-}" = --force ] || [ $((now - checked)) -ge "$UPDATE_TTL" ]; }; then
+      fetched=$(latest_release)
+      if [ -n "$fetched" ]; then latest=$fetched; checked=$now
+      else checked=$((now - UPDATE_TTL + 3600)); fi
+    fi
+    available=false
+    if [ "$check" = on ] && [ -n "$current" ] && [ -n "$latest" ] && version_gt "$latest" "$current"; then
+      available=true
+      if [ "$notified" != "$latest" ]; then
+        notified=$latest
+        setsid "$0" notify-update "$current" "$latest" "$install" >/dev/null 2>&1 </dev/null &
+      fi
+    fi
+    mkdir -p "$STATE_DIR"
+    jq -cn --arg current "$current" --arg install "$install" --arg path "${install_path:-}" \
+      --argjson check "$([ "$check" = on ] && echo true || echo false)" \
+      --arg latest "$latest" --argjson available "$available" \
+      --arg url "$([ -n "$latest" ] && release_url "$latest")" \
+      --argjson checked "$checked" --arg notified "$notified" \
+      '{current: $current, install: $install, path: $path, checkUpdates: $check,
+        latest: $latest, updateAvailable: $available, releaseUrl: $url,
+        checkedAt: $checked, notified: $notified}' | tee "$UPDATE_FILE"
+    ;;
+
+  notify-update)
+    current="${2:?current}"; latest="${3:?latest}"; install="${4:-}"
+    if [ "$install" = release ]; then
+      choice=$(notify-send -a Varlatch -A "update=Update" -A "notes=Release notes" --wait "Varlatch" \
+        "CLI $latest is available (you have $current)." || true)
+    else
+      choice=$(notify-send -a Varlatch -A "notes=Release notes" --wait "Varlatch" \
+        "CLI $latest is available (you have $current)." || true)
+    fi
+    case "$choice" in
+      update) exec omarchy-launch-floating-terminal-with-presentation "$0 upgrade-cli $latest" ;;
+      notes) xdg-open "$(release_url "$latest")" >/dev/null 2>&1 & ;;
+    esac
+    ;;
+
+  upgrade-cli)
+    # Interactive, in a terminal: the documented CLI install, automated.
+    # Download the release's single-file CLI and SHA256SUMS, check the
+    # signature when the release carries one, check the checksum, show what
+    # was verified, and replace the CLI only after the user confirms.
+    set +e
+    die() { echo; echo "varlatch: $*" >&2; exit 1; }
+    target="${2:-}"
+
+    read -r install path <<<"$(cli_install)"
+
+    # From 0.11.0 the CLI updates itself (same checks, and it asks before
+    # replacing anything); older ones get the same steps done here.
+    # (Help captured first: `grep -q` closing the pipe early would fail it
+    # under pipefail.)
+    help=""; [ "$install" = release ] && help=$("$path" --help 2>&1)
+    if [[ "$help" == *self-update* ]]; then
+      # While the repository is private, the GitHub CLI's token reaches it.
+      if [ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+        GH_TOKEN=$(gh auth token 2>/dev/null || true); export GH_TOKEN
+      fi
+      if [ -w "$(dirname "$path")" ]; then
+        "$path" self-update ${target:+"$target"}; rc=$?
+      else
+        echo "$(dirname "$path") is not writable; using sudo."
+        sudo env ${GH_TOKEN:+GH_TOKEN="$GH_TOKEN"} "$(command -v node)" "$path" self-update ${target:+"$target"}; rc=$?
+      fi
+      "$0" version-info --force >/dev/null 2>&1; refresh_version
+      exit $rc
+    fi
+
+    case "$install" in
+      release) ;;
+      checkout) die "$path is built from a source checkout. Update it there: git pull, then pnpm install && pnpm build." ;;
+      missing) die "no varlatch CLI found on PATH. See https://github.com/$RELEASE_REPO/releases." ;;
+      *) die "varlatchCommand is \"$CMD\", which the plugin does not manage. Update it by hand." ;;
+    esac
+
+    current=$(cli_version)
+    [ -n "$target" ] || target=$(latest_release)
+    [ -n "$target" ] || die "cannot find the latest release of $RELEASE_REPO (offline, or private without a signed-in gh)."
+    target=${target#v}
+    if [ -n "$current" ] && ! version_gt "$target" "$current"; then
+      echo "varlatch $current is up to date."; exit 0
+    fi
+    node_major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+    [ "$node_major" -ge 22 ] 2>/dev/null || die "the release CLI needs Node.js 22 or newer (found: $(node --version 2>/dev/null || echo none))."
+
+    asset="varlatch-cli-$target.cjs"
+    base="https://github.com/$RELEASE_REPO/releases/download/v$target"
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    echo "Downloading $asset from $RELEASE_REPO..."
+    if curl -fsL -o "$tmp/$asset" "$base/$asset" && curl -fsL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS"; then
+      curl -fsSL -o "$tmp/SHA256SUMS.sigstore.json" "$base/SHA256SUMS.sigstore.json" 2>/dev/null \
+        || rm -f "$tmp/SHA256SUMS.sigstore.json"
+    elif command -v gh >/dev/null 2>&1; then
+      # Private repository: same assets through the signed-in GitHub CLI.
+      echo "Not publicly downloadable; using the GitHub CLI."
+      rm -f "$tmp"/*
+      gh release download "v$target" -R "$RELEASE_REPO" -D "$tmp" -p "$asset" -p SHA256SUMS \
+        || die "download failed."
+      gh release download "v$target" -R "$RELEASE_REPO" -D "$tmp" -p SHA256SUMS.sigstore.json >/dev/null 2>&1 || true
+    else
+      die "download failed (a private repository needs the GitHub CLI, signed in)."
+    fi
+
+    if [ -f "$tmp/SHA256SUMS.sigstore.json" ]; then
+      if command -v cosign >/dev/null 2>&1; then
+        cosign verify-blob "$tmp/SHA256SUMS" --bundle "$tmp/SHA256SUMS.sigstore.json" \
+          --certificate-identity "https://github.com/$RELEASE_REPO/.github/workflows/release.yml@refs/tags/v$target" \
+          --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null 2>&1 \
+          || die "the signature on SHA256SUMS does NOT verify. Nothing was installed."
+        signature="verified: signed by the $RELEASE_REPO release workflow for v$target"
+      else
+        signature="NOT checked: the release is signed, but cosign is not installed"
+      fi
+    else
+      signature="none: this release carries no signature"
+    fi
+    # Check this asset's own line; --ignore-missing would pass an unlisted file.
+    (cd "$tmp" && grep -E "^[0-9a-f]{64} [ *]$asset\$" SHA256SUMS | sha256sum --check --status) \
+      || die "$asset does not match SHA256SUMS. Nothing was installed."
+    got=$(node "$tmp/$asset" --version 2>/dev/null | sed -nE '1s/^varlatch ([0-9][^ ]*).*/\1/p')
+    [ "$got" = "$target" ] || die "the downloaded CLI reports version \"$got\", expected $target."
+
+    echo
+    echo "  varlatch ${current:-?} -> $target"
+    echo "  install:   $path"
+    echo "  checksum:  ok (SHA256SUMS)"
+    echo "  signature: $signature"
+    echo "  changes:   $(release_url "$target")"
+    echo
+    echo "  Pre-1.0 releases may change the CLI and the /v1 API. If this machine"
+    echo "  runs a Varlatch installation, upgrade it first (varlatch upgrade)."
+    echo
+    read -rp "Install? [y/N] " answer
+    [[ "$answer" =~ ^[yY] ]] || { echo "Nothing installed."; exit 130; }
+
+    # Write next to the target, then rename over it: never a half-written
+    # CLI, and a symlink is replaced rather than followed.
+    dir=$(dirname "$path"); sudo=""
+    [ -w "$dir" ] || { sudo="sudo"; echo "$dir is not writable; using sudo."; }
+    $sudo install -m 755 "$tmp/$asset" "$dir/.varlatch-new.$$" \
+      && $sudo mv -f "$dir/.varlatch-new.$$" "$path" \
+      || { $sudo rm -f "$dir/.varlatch-new.$$"; die "install failed."; }
+    echo "Installed: $(eval "$CMD --version")"
+    "$0" version-info --force >/dev/null 2>&1
+    refresh_version
     ;;
 
   sync-menu)
@@ -277,8 +496,19 @@ if servers:
         "action": f"{bin_path} verify"}))
     entries.append(("varlatch.web", {"icon": "", "label": "Open dashboard",
         "action": f"{bin_path} web"}))
-entries.append(("varlatch.status", {"icon": "", "label": "Show full status",
-    "action": f"{bin_path} status-notify"}))
+# CLI version and update, from the widget's last version-info.
+try:
+    ver = json.load(open(os.path.join(home, ".local/state/varlatch-omarchy/update.json"), encoding="utf-8"))
+except Exception:
+    ver = {}
+if ver.get("updateAvailable") and ver.get("install") == "release":
+    entries.append(("varlatch.update", {"icon": "", "label": "Update CLI",
+        "description": f"{ver.get('current')} → {ver.get('latest')}",
+        "action": f"omarchy-launch-floating-terminal-with-presentation {bin_path} upgrade-cli {ver.get('latest')}"}))
+status = {"icon": "", "label": "Show full status", "action": f"{bin_path} status-notify"}
+if ver.get("current"):
+    status["description"] = f"CLI {ver['current']}"
+entries.append(("varlatch.status", status))
 
 body = ",\n".join(f'  "{k}": {json.dumps(v, ensure_ascii=False)}' for k, v in entries)
 block = ("// >>> varlatch plugin (managed block; regenerated by varlatch-menu sync-menu)\n"
@@ -294,7 +524,7 @@ PY
     ;;
 
   *)
-    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-cancel|logout [server]|web|refresh|sync-menu>" >&2
+    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-cancel|logout [server]|web|refresh|sync-menu|version-info [--force]|notify-update <current> <latest> <install>|upgrade-cli [version]>" >&2
     exit 1
     ;;
 esac

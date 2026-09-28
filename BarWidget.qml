@@ -8,6 +8,8 @@ import qs.Ui
 // Varlatch session disclosure. Everything shown here
 // comes from `varlatch status --json`, which reads local files only — the
 // widget never makes ambient authenticated calls with a stored credential.
+// The one ambient network read is the opt-in release check (checkUpdates),
+// which is anonymous and cached by the helper.
 // Actions (login/renew, logout, verify with --probe) live in the panel,
 // the omarchy menu, and the expiry notifications.
 BarWidget {
@@ -44,7 +46,55 @@ BarWidget {
     statusProc.running = true
   }
 
-  onSettingsChanged: { refresh(); injectPanel() }
+  onSettingsChanged: { refresh(); refreshVersion(); injectPanel() }
+
+  // ---- CLI version and updates, from `varlatch-menu version-info`: the
+  // installed version, how it is installed ("release" builds can be
+  // replaced by the plugin; "checkout" and "custom" cannot), and with
+  // checkUpdates on, the latest release (the helper caches the check).
+  property string cliVersion: ""
+  property string cliInstall: ""
+  property string latestVersion: ""
+  property bool updateAvailable: false
+  property string releaseUrl: ""
+  readonly property bool canUpgrade: updateAvailable && cliInstall === "release"
+
+  property bool _versionQueued: false
+  function refreshVersion() {
+    if (versionProc.running) { _versionQueued = true; return }
+    versionProc.running = true
+  }
+
+  function upgradeCli() {
+    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation",
+      root.menuHelper + " upgrade-cli " + root.latestVersion])
+  }
+
+  Process {
+    id: versionProc
+    running: false
+    command: ["bash", "-lc", "'" + root.menuHelper + "' version-info"]
+    stdout: StdioCollector { id: versionStdout; waitForEnd: true }
+    onExited: function (exitCode) {
+      var doc = null
+      if (exitCode === 0) { try { doc = JSON.parse(String(versionStdout.text || "")) } catch (e) {} }
+      root.cliVersion = doc ? doc.current || "" : ""
+      root.cliInstall = doc ? doc.install || "" : ""
+      root.latestVersion = doc ? doc.latest || "" : ""
+      root.updateAvailable = doc ? doc.updateAvailable === true : false
+      root.releaseUrl = doc ? doc.releaseUrl || "" : ""
+      if (root._versionQueued) { root._versionQueued = false; Qt.callLater(root.refreshVersion) }
+    }
+  }
+
+  // Hourly; the helper only goes to the network once its cache is stale.
+  Timer {
+    interval: 3600 * 1000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.refreshVersion()
+  }
 
   // The CLI decides "expiring" (under 20% of the credential's lifetime
   // left); older CLIs lack the field, so fall back to the same rule here.
@@ -235,12 +285,13 @@ BarWidget {
   IpcHandler {
     target: "varlatch"
     function refresh(): void { root.broadcast("refresh") }
+    function refreshVersion(): void { root.broadcast("refreshVersion") }
     function verify(): void { root.verify() }
     function open(): void { root.open() }
     function close(): void { root.close() }
     function toggle(): void { root.togglePanel() }
     function debugState(): string {
-      return JSON.stringify({ sessionState: root.sessionState, servers: root.servers, pendingLogin: root.pendingLogin, errorDetail: root.errorDetail, opened: root.opened, hasPanel: !!panelLoader.item })
+      return JSON.stringify({ sessionState: root.sessionState, servers: root.servers, pendingLogin: root.pendingLogin, cliVersion: root.cliVersion, cliInstall: root.cliInstall, latestVersion: root.latestVersion, updateAvailable: root.updateAvailable, errorDetail: root.errorDetail, opened: root.opened, hasPanel: !!panelLoader.item })
     }
   }
 
@@ -255,6 +306,7 @@ BarWidget {
       lines.push(shortHost(s.server) + ": " + (s.state === "expired" ? "EXPIRED"
         : s.expiresAt ? remainingText(s.expiresAt, now) : "no expiry recorded"))
     }
+    if (updateAvailable) lines.push("CLI " + latestVersion + " available")
     return "Varlatch\n" + lines.join("\n")
   }
 

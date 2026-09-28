@@ -319,6 +319,60 @@ Panel {
             onClicked: root.act(["login"])
           }
         }
+
+        // ---- Footer: CLI version, and a newer release when checkUpdates
+        // finds one. "update" only for the release build the plugin can
+        // replace; a source checkout or custom command gets the notes.
+        PanelSeparator {
+          visible: footer.visible
+          width: parent.width
+        }
+
+        Item {
+          id: footer
+          readonly property var host: root.hostWidget
+          visible: !!host && host.cliVersion !== ""
+          width: parent.width
+          height: Math.max(footerText.implicitHeight, footerChips.implicitHeight)
+
+          Text {
+            id: footerText
+            anchors.left: parent.left
+            anchors.right: footerChips.left
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            elide: Text.ElideRight
+            textFormat: Text.StyledText
+            text: {
+              var h = footer.host
+              if (!h) return ""
+              var t = "CLI " + h.cliVersion
+              if (h.cliInstall === "checkout") t += " · source checkout"
+              if (h.updateAvailable) t += " · <font color=\"#e0993e\">" + h.latestVersion + " available</font>"
+              return t
+            }
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Row {
+            id: footerChips
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(6)
+            Chip {
+              label: "notes"
+              visible: !!footer.host && footer.host.updateAvailable
+              onClicked: { Quickshell.execDetached(["xdg-open", footer.host.releaseUrl]); root.close() }
+            }
+            Chip {
+              label: "update"
+              visible: !!footer.host && footer.host.canUpgrade
+              onClicked: { footer.host.upgradeCli(); root.close() }
+            }
+          }
+        }
       }
     }
   }
