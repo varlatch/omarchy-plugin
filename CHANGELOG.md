@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0 (2026-10-07)
+
+- **Restart after an update:** the shell keeps running the widget code it
+  loaded until it restarts, even after `omarchy plugin update`. The widget
+  now notices newer code on disk and offers **restart** in the panel, a
+  **Restart to load** row in the menu, and one notification with **Restart
+  now** (`omarchy restart shell`). A sign-in under way survives it.
+- **Each row has "⋯"** for its other actions: **copy address**, **other
+  device** (sign in again from a phone or another computer), **log out**,
+  and with several servers that server's **dashboard**. The host name opens
+  the dashboard too. The header's **dashboard** shows only with one server;
+  before, it opened the first server whatever you meant.
+- Logged out, **other device** sits next to **log in**.
+- The menu has one dashboard row per server.
+- Visible text reads "Logged in, 3h 12m left" instead of using a dash.
+
 ## 0.4.0 (2026-10-07)
 
 - **First run.** Without the `varlatch` CLI, the panel and the menu offer
