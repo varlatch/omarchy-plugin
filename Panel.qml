@@ -368,8 +368,8 @@ Panel {
         }
 
         // ---- Sessions. The host name opens that server's dashboard; "⋯"
-        // shows the row's other actions: dashboard, copy address, and
-        // signing in again from another device.
+        // shows the row's other actions: dashboard, copy address, signing
+        // in again from another device, and log out.
         Repeater {
           model: root.servers
           delegate: Column {
@@ -450,18 +450,9 @@ Panel {
                 // old credential only once the new one is saved, so a cancelled
                 // sign-in loses nothing.
                 Chip {
-                  label: "renew"
-                  visible: sessionRow.modelData.expired !== true && root.pendingLogin === null
+                  label: sessionRow.modelData.expired === true ? "log in" : "renew"
+                  visible: root.pendingLogin === null
                   onClicked: root.act(["login", sessionRow.modelData.server])
-                }
-                Chip {
-                  label: sessionRow.modelData.expired === true ? "log in" : "log out"
-                  danger: sessionRow.modelData.expired !== true
-                  visible: sessionRow.modelData.expired !== true || root.pendingLogin === null
-                  onClicked: {
-                    if (sessionRow.modelData.expired === true) root.act(["login", sessionRow.modelData.server])
-                    else { root.act(["logout", sessionRow.modelData.server]); root.close() }
-                  }
                 }
                 Chip {
                   label: "⋯"
@@ -470,36 +461,39 @@ Panel {
               }
             }
 
-            Item {
+            // Right-aligned and wrapping, so children are listed right to
+            // left: log out ends up last on the line.
+            Flow {
               visible: sessionRow.expanded
               width: parent.width
-              height: moreChips.implicitHeight
+              layoutDirection: Qt.RightToLeft
+              spacing: Style.space(6)
 
-              Row {
-                id: moreChips
-                anchors.right: parent.right
-                spacing: Style.space(6)
-                Chip {
-                  label: "dashboard"
-                  onClicked: { root.act(["web", sessionRow.modelData.server]); root.close() }
+              Chip {
+                label: "log out"
+                danger: true
+                onClicked: { root.act(["logout", sessionRow.modelData.server]); root.close() }
+              }
+              // Renew (or log in again) from a phone or another computer.
+              Chip {
+                label: "other device"
+                visible: root.pendingLogin === null && !!root.hostWidget && root.hostWidget.deviceSignIn
+                onClicked: root.act(["login-device", sessionRow.modelData.server])
+              }
+              Chip {
+                id: copyChip
+                property bool copied: false
+                label: copied ? "copied" : "copy address"
+                onClicked: {
+                  Quickshell.execDetached(["wl-copy", sessionRow.modelData.server])
+                  copied = true
+                  copiedTimer.restart()
                 }
-                Chip {
-                  id: copyChip
-                  property bool copied: false
-                  label: copied ? "copied" : "copy address"
-                  onClicked: {
-                    Quickshell.execDetached(["wl-copy", sessionRow.modelData.server])
-                    copied = true
-                    copiedTimer.restart()
-                  }
-                  Timer { id: copiedTimer; interval: 1500; onTriggered: copyChip.copied = false }
-                }
-                // Renew (or log in again) from a phone or another computer.
-                Chip {
-                  label: "other device"
-                  visible: root.pendingLogin === null && !!root.hostWidget && root.hostWidget.deviceSignIn
-                  onClicked: root.act(["login-device", sessionRow.modelData.server])
-                }
+                Timer { id: copiedTimer; interval: 1500; onTriggered: copyChip.copied = false }
+              }
+              Chip {
+                label: "dashboard"
+                onClicked: { root.act(["web", sessionRow.modelData.server]); root.close() }
               }
             }
           }
