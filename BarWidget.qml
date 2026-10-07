@@ -122,6 +122,56 @@ BarWidget {
     }
   }
 
+  // ---- This plugin's own updates. `omarchy plugin update` puts newer
+  // code on disk, but the shell keeps running what it loaded until it
+  // restarts (it re-creates the widget, from its cached copy). The helper
+  // fingerprints the manifest and QML on disk and remembers the
+  // fingerprint the running shell loaded. A difference offers a restart:
+  // in the panel, in the menu, and in one notification per newer copy. A
+  // sign-in under way survives the restart, since its helper runs outside
+  // the shell.
+  property string loadedCode: ""
+  property string loadedVersion: ""
+  property string installedCode: ""
+  property string installedVersion: ""
+  property string _notifiedCode: ""
+  readonly property bool pluginUpdated: loadedCode !== "" && installedCode !== "" && installedCode !== loadedCode
+
+  function checkPluginUpdate() { if (!pluginProc.running) pluginProc.running = true }
+  function restartShell() { Quickshell.execDetached(["omarchy", "restart", "shell"]) }
+  function syncMenuArgs() {
+    return [menuHelper, "sync-menu"].concat(pluginUpdated ? ["--restart", installedVersion || "update"] : [])
+  }
+
+  Process {
+    id: pluginProc
+    running: false
+    command: [root.menuHelper, "plugin-info"]
+    stdout: StdioCollector { id: pluginStdout; waitForEnd: true }
+    onExited: function (exitCode) {
+      var doc = null
+      if (exitCode === 0) { try { doc = JSON.parse(String(pluginStdout.text || "")) } catch (e) {} }
+      if (!doc || !doc.code || !doc.loadedCode) return
+      root.loadedCode = doc.loadedCode
+      root.loadedVersion = doc.loadedVersion || ""
+      root.installedCode = doc.code
+      root.installedVersion = doc.version || ""
+      if (root.pluginUpdated && root._notifiedCode !== doc.code) {
+        root._notifiedCode = doc.code
+        Quickshell.execDetached([root.menuHelper, "notify-plugin-update", root.installedVersion])
+        Quickshell.execDetached(root.syncMenuArgs())
+      }
+    }
+  }
+
+  Timer {
+    interval: 60 * 1000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.checkPluginUpdate()
+  }
+
   // Hourly; the helper only goes to the network once its cache is stale.
   Timer {
     interval: 3600 * 1000
@@ -194,7 +244,7 @@ BarWidget {
     root.errorDetail = ""
     // Keep the omarchy-menu submenu in step with session state (it no-ops
     // and skips the menu refresh when nothing changed).
-    Quickshell.execDetached([root.menuHelper, "sync-menu"])
+    Quickshell.execDetached(root.syncMenuArgs())
   }
 
   readonly property string menuHelper:
@@ -301,7 +351,7 @@ BarWidget {
         root.errorDetail = err.trim() || "varlatch not found"
       }
       // The menu offers installing the CLI while it is missing.
-      Quickshell.execDetached([root.menuHelper, "sync-menu"])
+      Quickshell.execDetached(root.syncMenuArgs())
       if (root._refreshQueued) { root._refreshQueued = false; Qt.callLater(root.refresh) }
     }
   }
@@ -364,7 +414,7 @@ BarWidget {
       panelLoader.item.expandedServer = server
     }
     function debugState(): string {
-      return JSON.stringify({ sessionState: root.sessionState, servers: root.servers, pendingLogin: root.pendingLogin, cliVersion: root.cliVersion, cliInstall: root.cliInstall, latestVersion: root.latestVersion, updateAvailable: root.updateAvailable, errorDetail: root.errorDetail, opened: root.opened, hasPanel: !!panelLoader.item, connecting: panelLoader.item ? panelLoader.item.connecting : false, connectFocused: panelLoader.item ? panelLoader.item.connectFocused : false, expandedServer: panelLoader.item ? panelLoader.item.expandedServer : "" })
+      return JSON.stringify({ sessionState: root.sessionState, servers: root.servers, pendingLogin: root.pendingLogin, cliVersion: root.cliVersion, cliInstall: root.cliInstall, latestVersion: root.latestVersion, updateAvailable: root.updateAvailable, errorDetail: root.errorDetail, opened: root.opened, hasPanel: !!panelLoader.item, connecting: panelLoader.item ? panelLoader.item.connecting : false, connectFocused: panelLoader.item ? panelLoader.item.connectFocused : false, expandedServer: panelLoader.item ? panelLoader.item.expandedServer : "", loadedVersion: root.loadedVersion, installedVersion: root.installedVersion, pluginUpdated: root.pluginUpdated })
     }
   }
 
@@ -383,6 +433,7 @@ BarWidget {
         : s.expiresAt ? remainingText(s.expiresAt, now) : "no expiry recorded"))
     }
     if (updateAvailable) lines.push("CLI " + latestVersion + " available")
+    if (pluginUpdated) lines.push("Restart the shell to load Varlatch for Omarchy " + (installedVersion || "update"))
     return "Varlatch\n" + lines.join("\n")
   }
 

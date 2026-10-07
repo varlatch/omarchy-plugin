@@ -38,7 +38,10 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       nowMs = Date.now()
-      if (hostWidget) hostWidget.refreshVersion(3600)
+      if (hostWidget) {
+        hostWidget.refreshVersion(3600)
+        hostWidget.checkPluginUpdate()
+      }
     } else {
       connecting = false
       connectError = ""
@@ -642,12 +645,44 @@ Panel {
           }
         }
 
-        // ---- Footer: CLI version, and a newer release when checkUpdates
-        // finds one. "update" only for the release build the plugin can
-        // replace; a source checkout or custom command gets the notes.
+        // ---- Footer: newer plugin code waiting for a shell restart; the
+        // CLI version, and a newer release when checkUpdates finds one.
+        // "update" only for the release build the plugin can replace; a
+        // source checkout or custom command gets the notes.
         PanelSeparator {
-          visible: footer.visible
+          visible: footer.visible || pluginUpdate.visible
           width: parent.width
+        }
+
+        Item {
+          id: pluginUpdate
+          visible: !!root.hostWidget && root.hostWidget.pluginUpdated
+          width: parent.width
+          height: Math.max(pluginUpdateText.implicitHeight, restartChip.implicitHeight)
+
+          Text {
+            id: pluginUpdateText
+            anchors.left: parent.left
+            anchors.right: restartChip.left
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            wrapMode: Text.WordWrap
+            text: root.hostWidget && root.hostWidget.installedVersion
+              && root.hostWidget.installedVersion !== root.hostWidget.loadedVersion
+              ? "Varlatch for Omarchy " + root.hostWidget.installedVersion + " is installed"
+              : "A newer copy of this widget is installed"
+            color: "#e0993e"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Chip {
+            id: restartChip
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            label: "restart"
+            onClicked: root.hostWidget.restartShell()
+          }
         }
 
         Item {

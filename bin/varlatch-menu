@@ -440,6 +440,48 @@ case "${1:-}" in
     refresh_widget
     ;;
 
+  plugin-info)
+    # The plugin's version and a fingerprint of the code the shell loads
+    # (the manifest and the QML), now on disk and as the running shell
+    # loaded it. `omarchy plugin update` (or an edit) puts newer code on
+    # disk, and the shell does re-create the widget, but from the copy it
+    # cached when it started, so only a shell restart loads it. The first
+    # call from a shell process (the widget runs this directly, so the
+    # shell is the parent) records what it loaded, keyed by that process's
+    # id and start time; later calls from it, re-created widgets included,
+    # get the same answer. The helper itself runs fresh on every call.
+    dir=$(cd "$(dirname "$0")/.." && pwd)
+    code=$(cat "$dir/manifest.json" "$dir"/*.qml 2>/dev/null | sha256sum | cut -d' ' -f1)
+    version=$(jq -r '.version // empty' "$dir/manifest.json" 2>/dev/null || true)
+    started=$(sed -E 's/^.*\) //' "/proc/$PPID/stat" 2>/dev/null | awk '{print $20}' || true)
+    key="$(boot_id):$PPID:${started:-0}"
+    loaded_file="$STATE_DIR/plugin-loaded.json"
+    mkdir -p "$STATE_DIR"
+    known="{}"
+    [ -f "$loaded_file" ] && known=$(jq -c 'if type == "object" then . else {} end' "$loaded_file" 2>/dev/null || echo "{}")
+    # Drop records of shell processes that are gone.
+    boot=$(boot_id)
+    for k in $(jq -r 'keys[]' <<<"$known"); do
+      IFS=: read -r b p s <<<"$k"
+      alive=$(sed -E 's/^.*\) //' "/proc/$p/stat" 2>/dev/null | awk '{print $20}' || true)
+      if [ "$b" != "$boot" ] || [ "$alive" != "$s" ]; then known=$(jq -c --arg k "$k" 'del(.[$k])' <<<"$known"); fi
+    done
+    if ! jq -e --arg k "$key" 'has($k)' <<<"$known" >/dev/null; then
+      known=$(jq -c --arg k "$key" --arg c "$code" --arg v "$version" '.[$k] = {code: $c, version: $v}' <<<"$known")
+    fi
+    printf '%s\n' "$known" > "$loaded_file"
+    jq -cn --arg v "$version" --arg c "$code" --argjson l "$(jq -c --arg k "$key" '.[$k]' <<<"$known")" \
+      '{version: $v, code: $c, loadedVersion: $l.version, loadedCode: $l.code}'
+    ;;
+
+  notify-plugin-update)
+    # One notification per newer copy, with a button to restart the shell.
+    version="${2:-}"
+    msg="Varlatch for Omarchy${version:+ $version} is installed. Restart the shell to load it."
+    choice=$(notify-send -a Varlatch -A "restart=Restart now" --wait "Varlatch" "$msg" || true)
+    [ "$choice" = "restart" ] && exec omarchy restart shell
+    ;;
+
   version-info)
     # One JSON line for the widget: the CLI version, how it is installed,
     # and (checkUpdates on) the latest release, cached in $UPDATE_FILE.
@@ -653,11 +695,14 @@ case "${1:-}" in
     ;;
 
   sync-menu)
+    # `--restart <version>`: the widget saw newer plugin code on disk.
+    restart_version=""
+    [ "${2:-}" = --restart ] && restart_version="${3:-}"
     # Regenerate this plugin's managed block in omarchy-menu.jsonc from the
     # current session state, so the submenu shows what you are logged in to
     # and offers only the actions that make sense. The menu hot-reloads the
     # file; we only rewrite (and refresh) when the content actually changed.
-    VARLATCH_MENU_CMD="$CMD" VARLATCH_SHOW_LOCALHOST="$(show_localhost && echo on || echo off)" python3 - <<'PY'
+    VARLATCH_RESTART_VERSION="$restart_version" VARLATCH_MENU_CMD="$CMD" VARLATCH_SHOW_LOCALHOST="$(show_localhost && echo on || echo off)" python3 - <<'PY'
 import json, os, re, subprocess, sys
 from datetime import datetime, timezone
 
@@ -807,6 +852,11 @@ if ver.get("updateAvailable") and ver.get("install") == "release":
     entries.append(("varlatch.update", {"icon": "", "label": "Update CLI",
         "description": f"{ver.get('current')} → {ver.get('latest')}",
         "action": f"omarchy-launch-floating-terminal-with-presentation {bin_path} upgrade-cli {ver.get('latest')}"}))
+if os.environ.get("VARLATCH_RESTART_VERSION"):
+    entries.append(("varlatch.restart", {"icon": "\uf021",
+        "label": "Restart to load Varlatch for Omarchy " + os.environ["VARLATCH_RESTART_VERSION"],
+        "description": "Newer widget code is installed; restarts the Omarchy shell",
+        "action": "omarchy restart shell"}))
 status = {"icon": "", "label": "Show full status", "action": f"{bin_path} status-notify"}
 if ver.get("current"):
     status["description"] = f"CLI {ver['current']}"
@@ -852,7 +902,7 @@ PY
     ;;
 
   *)
-    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-device [server]|login-cancel|login-check|logout [server]|web [server]|refresh|sync-menu|version-info [--force|--max-age <s>]|notify-update <current> <latest> <install>|upgrade-cli [version]|install-cli>" >&2
+    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-device [server]|login-cancel|login-check|logout [server]|web [server]|refresh|plugin-info|notify-plugin-update <version>|sync-menu [--restart <version>]|version-info [--force|--max-age <s>]|notify-update <current> <latest> <install>|upgrade-cli [version]|install-cli>" >&2
     exit 1
     ;;
 esac
