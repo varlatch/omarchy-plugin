@@ -85,6 +85,9 @@ Panel {
     Qt.callLater(function () { if (connectField) connectField.forceActiveFocus() })
   }
 
+  // For the widget's debugState.
+  readonly property bool connectFocused: connectField.activeFocus
+
   function stopConnect() {
     connecting = false
     connectError = ""

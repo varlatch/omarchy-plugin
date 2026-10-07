@@ -335,7 +335,7 @@ BarWidget {
     // Open the panel on its server address form.
     function connect(): void { if (panelLoader.item) panelLoader.item.startConnect() }
     function debugState(): string {
-      return JSON.stringify({ sessionState: root.sessionState, servers: root.servers, pendingLogin: root.pendingLogin, cliVersion: root.cliVersion, cliInstall: root.cliInstall, latestVersion: root.latestVersion, updateAvailable: root.updateAvailable, errorDetail: root.errorDetail, opened: root.opened, hasPanel: !!panelLoader.item })
+      return JSON.stringify({ sessionState: root.sessionState, servers: root.servers, pendingLogin: root.pendingLogin, cliVersion: root.cliVersion, cliInstall: root.cliInstall, latestVersion: root.latestVersion, updateAvailable: root.updateAvailable, errorDetail: root.errorDetail, opened: root.opened, hasPanel: !!panelLoader.item, connecting: panelLoader.item ? panelLoader.item.connecting : false, connectFocused: panelLoader.item ? panelLoader.item.connectFocused : false })
     }
   }
 
