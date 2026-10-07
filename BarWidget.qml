@@ -274,8 +274,7 @@ BarWidget {
         root.errorDetail = "varlatch CLI has no `status`; update it"
       } else {
         root.sessionState = "unavailable"
-        // 127: the shell found no such command.
-        root.errorDetail = exitCode === 127 ? "varlatch not found" : err.trim() || "varlatch not found"
+        root.errorDetail = err.trim() || "varlatch not found"
       }
       // The menu offers installing the CLI while it is missing.
       Quickshell.execDetached([root.menuHelper, "sync-menu"])
