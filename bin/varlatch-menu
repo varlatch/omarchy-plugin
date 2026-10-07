@@ -31,8 +31,11 @@ STATE_FILE="$STATE_DIR/servers.json"
 LOGIN_FILE="$STATE_DIR/login.json"
 UPDATE_FILE="$STATE_DIR/update.json"
 RELEASE_REPO="${VARLATCH_RELEASE_REPO:-varlatch/varlatch}"
-# Seconds between release checks; a failed check retries after an hour.
+# Seconds between release checks in the background. However stale, the
+# release check runs at most once an hour, so a failed one retries an hour
+# later.
 UPDATE_TTL=43200
+UPDATE_MIN_GAP=3600
 
 boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || true; }
 
@@ -439,21 +442,36 @@ case "${1:-}" in
   version-info)
     # One JSON line for the widget: the CLI version, how it is installed,
     # and (checkUpdates on) the latest release, cached in $UPDATE_FILE.
-    # `--force` skips the cache.
+    # `--force` skips the cache; `--max-age <s>` checks again when the last
+    # successful check is older than that (the panel passes an hour when it
+    # opens; the background default is $UPDATE_TTL).
+    force=false; max_age=$UPDATE_TTL
+    case "${2:-}" in
+      --force) force=true ;;
+      --max-age) [[ "${3:-}" =~ ^[0-9]+$ ]] && max_age=$3 ;;
+    esac
     current=$(cli_version)
     read -r install install_path <<<"$(cli_install)" || true
     check=$(widget_setting checkUpdates off)
-    latest=""; checked=0; notified=""
+    latest=""; checked=0; attempted=0; notified=""
     if [ -f "$UPDATE_FILE" ]; then
       latest=$(jq -r '.latest // empty' "$UPDATE_FILE" 2>/dev/null || true)
       checked=$(jq -r '.checkedAt // 0' "$UPDATE_FILE" 2>/dev/null || echo 0)
+      attempted=$(jq -r '.attemptedAt // .checkedAt // 0' "$UPDATE_FILE" 2>/dev/null || echo 0)
       notified=$(jq -r '.notified // empty' "$UPDATE_FILE" 2>/dev/null || true)
     fi
     now=$(date +%s)
-    if [ "$check" = on ] && { [ "${2:-}" = --force ] || [ $((now - checked)) -ge "$UPDATE_TTL" ]; }; then
+    # Stale: older than max_age, or older than the CLI installed here (a
+    # release came out, and was installed, since the last check).
+    stale=false
+    if [ $((now - checked)) -ge "$max_age" ] \
+        || { [ -n "$current" ] && [ -n "$latest" ] && version_gt "$current" "$latest"; }; then
+      stale=true
+    fi
+    if [ "$check" = on ] && { $force || { $stale && [ $((now - attempted)) -ge "$UPDATE_MIN_GAP" ]; }; }; then
+      attempted=$now
       fetched=$(latest_release)
-      if [ -n "$fetched" ]; then latest=$fetched; checked=$now
-      else checked=$((now - UPDATE_TTL + 3600)); fi
+      if [ -n "$fetched" ]; then latest=$fetched; checked=$now; fi
     fi
     available=false
     if [ "$check" = on ] && [ -n "$current" ] && [ -n "$latest" ] && version_gt "$latest" "$current"; then
@@ -468,10 +486,10 @@ case "${1:-}" in
       --argjson check "$([ "$check" = on ] && echo true || echo false)" \
       --arg latest "$latest" --argjson available "$available" \
       --arg url "$([ -n "$latest" ] && release_url "$latest")" \
-      --argjson checked "$checked" --arg notified "$notified" \
+      --argjson checked "$checked" --argjson attempted "$attempted" --arg notified "$notified" \
       '{current: $current, install: $install, path: $path, checkUpdates: $check,
         latest: $latest, updateAvailable: $available, releaseUrl: $url,
-        checkedAt: $checked, notified: $notified}' | tee "$UPDATE_FILE"
+        checkedAt: $checked, attemptedAt: $attempted, notified: $notified}' | tee "$UPDATE_FILE"
     ;;
 
   notify-update)
@@ -827,7 +845,7 @@ PY
     ;;
 
   *)
-    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-device [server]|login-cancel|login-check|logout [server]|web|refresh|sync-menu|version-info [--force]|notify-update <current> <latest> <install>|upgrade-cli [version]|install-cli>" >&2
+    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-device [server]|login-cancel|login-check|logout [server]|web|refresh|sync-menu|version-info [--force|--max-age <s>]|notify-update <current> <latest> <install>|upgrade-cli [version]|install-cli>" >&2
     exit 1
     ;;
 esac

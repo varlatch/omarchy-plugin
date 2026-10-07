@@ -110,8 +110,11 @@ The widget polls `varlatch status --json` on a timer, which reads local
 files only (`~/.config/varlatch/credentials.json` and repository-local
 state). It never uses a stored credential on its own; the only network
 requests are the ones you start with a click, and, with `checkUpdates` on,
-an anonymous check for the latest release at most twice a day, cached in
-`~/.local/state/varlatch-omarchy/update.json`.
+an anonymous check for the latest release, cached in
+`~/.local/state/varlatch-omarchy/update.json`. That check runs twice a day
+in the background, again when you open the panel and the last one is over
+an hour old, and when the cache names an older release than the CLI you
+have; never more than once an hour.
 
 ## Settings
 
