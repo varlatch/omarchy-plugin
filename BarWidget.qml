@@ -124,11 +124,12 @@ BarWidget {
 
   // ---- This plugin's own updates. `omarchy plugin update` puts newer
   // code on disk, but the shell keeps running what it loaded until it
-  // restarts. The helper fingerprints the manifest and QML; the first
-  // answer is what this widget was loaded from, later ones are what is on
-  // disk now. A difference offers a restart: in the panel, in the menu,
-  // and in one notification per newer copy. A sign-in under way survives
-  // the restart, since its helper runs outside the shell.
+  // restarts (it re-creates the widget, from its cached copy). The helper
+  // fingerprints the manifest and QML on disk and remembers the
+  // fingerprint the running shell loaded. A difference offers a restart:
+  // in the panel, in the menu, and in one notification per newer copy. A
+  // sign-in under way survives the restart, since its helper runs outside
+  // the shell.
   property string loadedCode: ""
   property string loadedVersion: ""
   property string installedCode: ""
@@ -150,12 +151,9 @@ BarWidget {
     onExited: function (exitCode) {
       var doc = null
       if (exitCode === 0) { try { doc = JSON.parse(String(pluginStdout.text || "")) } catch (e) {} }
-      if (!doc || !doc.code) return
-      if (root.loadedCode === "") {
-        root.loadedCode = doc.code
-        root.loadedVersion = doc.version || ""
-        return
-      }
+      if (!doc || !doc.code || !doc.loadedCode) return
+      root.loadedCode = doc.loadedCode
+      root.loadedVersion = doc.loadedVersion || ""
       root.installedCode = doc.code
       root.installedVersion = doc.version || ""
       if (root.pluginUpdated && root._notifiedCode !== doc.code) {

@@ -306,12 +306,24 @@ COPY="$T/plugin-copy"; mkdir -p "$COPY"
 cp -R "$ROOT/bin" "$ROOT/manifest.json" "$COPY/"; cp "$ROOT"/*.qml "$COPY/"
 info() { "$COPY/bin/varlatch-menu" plugin-info; }
 first=$(info)
-check "plugin-info: version and a code fingerprint" \
-  "jq -e --arg v \"\$(jq -r .version '$ROOT/manifest.json')\" '.version == \$v and (.code | test(\"^[0-9a-f]{64}$\"))' <<<'$first' >/dev/null"
+check "plugin-info: version and a code fingerprint, loaded = on disk at first" \
+  "jq -e --arg v \"\$(jq -r .version '$ROOT/manifest.json')\" '.version == \$v and (.code | test(\"^[0-9a-f]{64}$\")) and .loadedCode == .code' <<<'$first' >/dev/null"
 echo "# notes" >> "$COPY/README.md"
 check "a change outside the manifest and QML keeps the fingerprint" '[ "$(info)" = "$first" ]'
 echo "// changed" >> "$COPY/Panel.qml"
-check "a QML change changes the fingerprint" '[ "$(info | jq -r .code)" != "$(jq -r .code <<<"$first")" ]'
+# shellcheck disable=SC2034 # read by check
+second=$(info)
+check "a QML change: newer code on disk, the same shell still has the old" \
+  '[ "$(jq -r .code <<<"$second")" != "$(jq -r .code <<<"$first")" ] && [ "$(jq -r .loadedCode <<<"$second")" = "$(jq -r .code <<<"$first")" ]'
+# A new shell process (here: another parent process) loads what is on disk.
+# shellcheck disable=SC2034 # read by check
+# (A second command keeps bash from exec'ing the helper in its own place.)
+third=$(bash -c '"$1/bin/varlatch-menu" plugin-info; true' _ "$COPY")
+check "a new shell process records what is on disk now" \
+  '[ "$(jq -r .loadedCode <<<"$third")" = "$(jq -r .code <<<"$second")" ]'
+info >/dev/null
+check "the next call drops records of exited processes" \
+  "[ \"\$(jq 'length' '$S/plugin-loaded.json')\" -eq 1 ]" "$(cat "$S/plugin-loaded.json" 2>/dev/null)"
 : > "$T/calls.log"; FAKE_CHOICE=restart "$H" notify-plugin-update 9.9.9
 check "notification offers Restart now and restarts the shell" \
   "calls | grep -q -- '-A restart=Restart now --wait Varlatch Varlatch for Omarchy 9.9.9 is installed' && calls | grep -q '^omarchy restart shell'"

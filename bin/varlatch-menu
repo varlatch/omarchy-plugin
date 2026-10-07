@@ -442,14 +442,36 @@ case "${1:-}" in
 
   plugin-info)
     # The plugin's version and a fingerprint of the code the shell loads
-    # (the manifest and the QML). The widget records it when it starts and
-    # compares later: a difference means `omarchy plugin update` (or an
-    # edit) put newer code on disk than the shell is running, which only a
-    # shell restart loads. The helper itself runs fresh on every call.
+    # (the manifest and the QML), now on disk and as the running shell
+    # loaded it. `omarchy plugin update` (or an edit) puts newer code on
+    # disk, and the shell does re-create the widget, but from the copy it
+    # cached when it started, so only a shell restart loads it. The first
+    # call from a shell process (the widget runs this directly, so the
+    # shell is the parent) records what it loaded, keyed by that process's
+    # id and start time; later calls from it, re-created widgets included,
+    # get the same answer. The helper itself runs fresh on every call.
     dir=$(cd "$(dirname "$0")/.." && pwd)
     code=$(cat "$dir/manifest.json" "$dir"/*.qml 2>/dev/null | sha256sum | cut -d' ' -f1)
     version=$(jq -r '.version // empty' "$dir/manifest.json" 2>/dev/null || true)
-    jq -cn --arg v "$version" --arg c "$code" '{version: $v, code: $c}'
+    started=$(sed -E 's/^.*\) //' "/proc/$PPID/stat" 2>/dev/null | awk '{print $20}' || true)
+    key="$(boot_id):$PPID:${started:-0}"
+    loaded_file="$STATE_DIR/plugin-loaded.json"
+    mkdir -p "$STATE_DIR"
+    known="{}"
+    [ -f "$loaded_file" ] && known=$(jq -c 'if type == "object" then . else {} end' "$loaded_file" 2>/dev/null || echo "{}")
+    # Drop records of shell processes that are gone.
+    boot=$(boot_id)
+    for k in $(jq -r 'keys[]' <<<"$known"); do
+      IFS=: read -r b p s <<<"$k"
+      alive=$(sed -E 's/^.*\) //' "/proc/$p/stat" 2>/dev/null | awk '{print $20}' || true)
+      if [ "$b" != "$boot" ] || [ "$alive" != "$s" ]; then known=$(jq -c --arg k "$k" 'del(.[$k])' <<<"$known"); fi
+    done
+    if ! jq -e --arg k "$key" 'has($k)' <<<"$known" >/dev/null; then
+      known=$(jq -c --arg k "$key" --arg c "$code" --arg v "$version" '.[$k] = {code: $c, version: $v}' <<<"$known")
+    fi
+    printf '%s\n' "$known" > "$loaded_file"
+    jq -cn --arg v "$version" --arg c "$code" --argjson l "$(jq -c --arg k "$key" '.[$k]' <<<"$known")" \
+      '{version: $v, code: $c, loadedVersion: $l.version, loadedCode: $l.code}'
     ;;
 
   notify-plugin-update)
