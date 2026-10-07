@@ -42,6 +42,9 @@ BarWidget {
   property bool _refreshQueued: false
   function refresh() {
     loginFile.reload()
+    // A sign-in whose process died without cleaning up would otherwise
+    // stay on the panel; the helper forgets it.
+    if (pendingLogin !== null) Quickshell.execDetached([menuHelper, "login-check"])
     if (statusProc.running) { _refreshQueued = true; return }
     statusProc.running = true
   }
@@ -68,6 +71,14 @@ BarWidget {
   function upgradeCli() {
     Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation",
       root.menuHelper + " upgrade-cli " + root.latestVersion])
+  }
+
+  // First run: no CLI on PATH. The helper installs the release build in a
+  // terminal, after the same checks as an update.
+  readonly property bool cliMissing: sessionState === "unavailable" && cliInstall === "missing"
+  function installCli() {
+    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation",
+      root.menuHelper + " install-cli"])
   }
 
   Process {
@@ -213,6 +224,34 @@ BarWidget {
     onLoadFailed: root.pendingLogin = null
   }
 
+  // Servers seen before (the helper remembers them across logouts), so
+  // "log in" has a target after a full logout.
+  property var rememberedServers: []
+  FileView {
+    id: serversFile
+    path: Quickshell.env("HOME") + "/.local/state/varlatch-omarchy/servers.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      var list = null
+      try { list = JSON.parse(text()) } catch (e) {}
+      root.rememberedServers = Array.isArray(list) ? list : []
+    }
+    onLoadFailed: root.rememberedServers = []
+  }
+
+  // Where "log in" goes when no session is stored: a server seen before
+  // (a real deployment first), else $VARLATCH_SERVER. Empty means the
+  // panel asks for an address.
+  readonly property string knownServer: {
+    var list = rememberedServers.filter(function (u) {
+      return typeof u === "string" && (root.showLocalhost || !root.isLocalhost(u))
+    })
+    list.sort(function (a, b) { return (root.isLocalhost(a) ? 1 : 0) - (root.isLocalhost(b) ? 1 : 0) })
+    return list.length > 0 ? list[0] : String(Quickshell.env("VARLATCH_SERVER") || "")
+  }
+
   Process {
     id: statusProc
     running: false
@@ -232,11 +271,14 @@ BarWidget {
       if ((out + err).indexOf("Usage:") >= 0) {
         // The CLI resolved but predates the `status` command.
         root.sessionState = "unsupported"
-        root.errorDetail = "varlatch CLI has no `status` — update it"
+        root.errorDetail = "varlatch CLI has no `status`; update it"
       } else {
         root.sessionState = "unavailable"
-        root.errorDetail = err.trim() || "varlatch not found"
+        // 127: the shell found no such command.
+        root.errorDetail = exitCode === 127 ? "varlatch not found" : err.trim() || "varlatch not found"
       }
+      // The menu offers installing the CLI while it is missing.
+      Quickshell.execDetached([root.menuHelper, "sync-menu"])
       if (root._refreshQueued) { root._refreshQueued = false; Qt.callLater(root.refresh) }
     }
   }
@@ -290,15 +332,20 @@ BarWidget {
     function open(): void { root.open() }
     function close(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    // Open the panel on its server address form.
+    function connect(): void { if (panelLoader.item) panelLoader.item.startConnect() }
     function debugState(): string {
       return JSON.stringify({ sessionState: root.sessionState, servers: root.servers, pendingLogin: root.pendingLogin, cliVersion: root.cliVersion, cliInstall: root.cliInstall, latestVersion: root.latestVersion, updateAvailable: root.updateAvailable, errorDetail: root.errorDetail, opened: root.opened, hasPanel: !!panelLoader.item })
     }
   }
 
   readonly property string tooltipText: {
+    if (cliMissing) return "Varlatch: the CLI is not installed; click to install it"
     if (sessionState === "unavailable") return "Varlatch: CLI unavailable (" + errorDetail + ")"
     if (sessionState === "unsupported") return "Varlatch: " + errorDetail
-    if (sessionState === "none") return "Varlatch: no stored credentials — click to log in"
+    if (sessionState === "none") return knownServer
+      ? "Varlatch: not logged in; click to log in"
+      : "Varlatch: not logged in; click to connect to a server"
     var now = Date.now()
     var lines = []
     for (var i = 0; i < servers.length; i++) {

@@ -34,11 +34,37 @@ RELEASE_REPO="${VARLATCH_RELEASE_REPO:-varlatch/varlatch}"
 # Seconds between release checks; a failed check retries after an hour.
 UPDATE_TTL=43200
 
+boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || true; }
+
 # A browser sign-in started by `login` is still waiting on its callback.
+# The boot id keeps a process id from before a reboot from matching
+# whatever process has it now.
 login_running() {
-  local pid
+  local pid boot
   pid=$(jq -r 'select(.state == "pending") | .pid // empty' "$LOGIN_FILE" 2>/dev/null || true)
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+  boot=$(jq -r 'select(.state == "pending") | .boot // empty' "$LOGIN_FILE" 2>/dev/null || true)
+  [ -n "$pid" ] && { [ -z "$boot" ] || [ "$boot" = "$(boot_id)" ]; } && kill -0 "$pid" 2>/dev/null
+}
+
+login_idle() { mkdir -p "$STATE_DIR"; echo '{"state":"idle"}' > "$LOGIN_FILE"; }
+
+# "https://varlatch.example.com" from what a person typed: trimmed,
+# https:// when no scheme is given, no trailing slash.
+normalize_server() {
+  local s
+  s=$(printf '%s' "$1" | tr -d '[:space:]')
+  s=${s%/}
+  [ -z "$s" ] && return 0
+  [[ "$s" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]] || s="https://$s"
+  echo "$s"
+}
+
+# Add a server to the ones "Log in" falls back to after a full logout.
+remember_server() {
+  mkdir -p "$STATE_DIR"
+  local known="[]"
+  [ -f "$STATE_FILE" ] && known=$(jq -c 'if type == "array" then . else [] end' "$STATE_FILE" 2>/dev/null || echo "[]")
+  jq -cn --arg s "$1" --argjson known "$known" '[$s] + ($known - [$s])' > "$STATE_FILE"
 }
 
 status_json() { eval "$CMD status --json" 2>/dev/null; }
@@ -109,6 +135,72 @@ release_url() { echo "https://github.com/$RELEASE_REPO/releases/tag/v$1"; }
 
 refresh_version() { omarchy-shell varlatch refreshVersion >/dev/null 2>&1 || true; }
 
+# The version a server runs, from its anonymous /v1/meta; empty when it
+# cannot be read.
+server_version() {
+  curl -fsS --max-time 10 "$1/v1/meta" 2>/dev/null | jq -r '.serverVersion // empty' 2>/dev/null \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true
+}
+
+# For upgrade-cli and install-cli, which run in a terminal.
+die() { echo; echo "varlatch: $*" >&2; exit 1; }
+
+need_node() {
+  local major
+  major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+  [ "$major" -ge 22 ] 2>/dev/null && return 0
+  if command -v omarchy >/dev/null 2>&1; then
+    die "the release CLI needs Node.js 22 or newer (found: $(node --version 2>/dev/null || echo none)). Install it with: omarchy install dev-env node"
+  fi
+  die "the release CLI needs Node.js 22 or newer (found: $(node --version 2>/dev/null || echo none))."
+}
+
+# Download release $1's single-file CLI into directory $2 and check it: the
+# signature on SHA256SUMS when the release carries one and cosign is
+# installed, the file's own line in SHA256SUMS, and the version it reports.
+# Sets $asset and $signature; dies before anything is installed.
+fetch_release() {
+  local version=$1 dir=$2 base got
+  asset="varlatch-cli-$version.cjs"
+  base="https://github.com/$RELEASE_REPO/releases/download/v$version"
+  echo "Downloading $asset from $RELEASE_REPO..."
+  curl -fsL -o "$dir/$asset" "$base/$asset" && curl -fsL -o "$dir/SHA256SUMS" "$base/SHA256SUMS" \
+    || die "download failed."
+  curl -fsSL -o "$dir/SHA256SUMS.sigstore.json" "$base/SHA256SUMS.sigstore.json" 2>/dev/null \
+    || rm -f "$dir/SHA256SUMS.sigstore.json"
+
+  if [ -f "$dir/SHA256SUMS.sigstore.json" ]; then
+    if command -v cosign >/dev/null 2>&1; then
+      cosign verify-blob "$dir/SHA256SUMS" --bundle "$dir/SHA256SUMS.sigstore.json" \
+        --certificate-identity "https://github.com/$RELEASE_REPO/.github/workflows/release.yml@refs/tags/v$version" \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null 2>&1 \
+        || die "the signature on SHA256SUMS does NOT verify. Nothing was installed."
+      signature="verified: signed by the $RELEASE_REPO release workflow for v$version"
+    else
+      signature="NOT checked: the release is signed, but cosign is not installed"
+    fi
+  else
+    signature="none: this release carries no signature"
+  fi
+  # Check this asset's own line; --ignore-missing would pass an unlisted file.
+  (cd "$dir" && grep -E "^[0-9a-f]{64} [ *]$asset\$" SHA256SUMS | sha256sum --check --status) \
+    || die "$asset does not match SHA256SUMS. Nothing was installed."
+  got=$(node "$dir/$asset" --version 2>/dev/null | sed -nE '1s/^varlatch ([0-9][^ ]*).*/\1/p')
+  [ "$got" = "$version" ] || die "the downloaded CLI reports version \"$got\", expected $version."
+}
+
+# Put the checked file $1 at $2: written next to it, then renamed over it,
+# so there is never a half-written CLI, and a symlink is replaced rather
+# than followed. Uses sudo when the directory is not writable.
+put_cli() {
+  local dir sudo=""
+  dir=$(dirname "$2")
+  [ -w "$dir" ] || { sudo="sudo"; echo "$dir is not writable; using sudo."; }
+  $sudo install -m 755 "$1" "$dir/.varlatch-new.$$" \
+    && $sudo mv -f "$dir/.varlatch-new.$$" "$2" \
+    || { $sudo rm -f "$dir/.varlatch-new.$$"; die "install failed."; }
+}
+
 case "${1:-}" in
   has-credentials)
     if show_localhost; then
@@ -136,8 +228,10 @@ case "${1:-}" in
   login)
     server="${2:-$(login_server)}"
     if [ -z "$server" ]; then
-      notify "No server known. Run once in a terminal: varlatch login --server <url>"
-      exit 1
+      # No server yet: the panel asks for its address.
+      omarchy-shell varlatch connect >/dev/null 2>&1 \
+        || notify "No server known. Open the Varlatch panel in the bar to connect to one."
+      exit 0
     fi
     # Browser-handoff flow, no terminal: the CLI opens the browser itself
     # and never reads stdin. The pending sign-in (server, fallback URL, pid)
@@ -151,13 +245,13 @@ case "${1:-}" in
       exit 0
     fi
     log=$(mktemp)
-    trap 'rm -f "$log"; echo "{\"state\":\"idle\"}" > "$LOGIN_FILE"; refresh_widget' EXIT
+    trap 'rm -f "$log"; login_idle; refresh_widget' EXIT
     # Own session, so cancel can signal the whole process group.
     setsid bash -c "exec $CMD login --server '$server'" >"$log" 2>&1 </dev/null &
     cli=$!
     write_login() {
-      jq -n --arg s "$server" --arg u "$1" --argjson p "$cli" \
-        '{state: "pending", server: $s, url: $u, pid: $p}' > "$LOGIN_FILE"
+      jq -n --arg s "$server" --arg u "$1" --argjson p "$cli" --arg b "$(boot_id)" \
+        '{state: "pending", server: $s, url: $u, pid: $p, boot: $b}' > "$LOGIN_FILE"
     }
     write_login ""
     url=""
@@ -183,9 +277,19 @@ case "${1:-}" in
     ;;
 
   login-cancel)
-    login_running || exit 0
+    # A sign-in whose process is already gone only needs forgetting.
+    login_running || { login_idle; exit 0; }
     pid=$(jq -r '.pid' "$LOGIN_FILE")
     kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    ;;
+
+  login-check)
+    # Forget a pending sign-in whose process is gone: killed before it could
+    # clean up, or from before a reboot. The widget runs this on each poll
+    # while the panel shows a sign-in.
+    if jq -e '.state == "pending"' "$LOGIN_FILE" >/dev/null 2>&1 && ! login_running; then
+      login_idle
+    fi
     ;;
 
   notify-session)
@@ -276,7 +380,6 @@ case "${1:-}" in
     # signature when the release carries one, check the checksum, show what
     # was verified, and replace the CLI only after the user confirms.
     set +e
-    die() { echo; echo "varlatch: $*" >&2; exit 1; }
     target="${2:-}"
 
     read -r install path <<<"$(cli_install)"
@@ -300,7 +403,7 @@ case "${1:-}" in
     case "$install" in
       release) ;;
       checkout) die "$path is built from a source checkout. Update it there: git pull, then pnpm install && pnpm build." ;;
-      missing) die "no varlatch CLI found on PATH. See https://github.com/$RELEASE_REPO/releases." ;;
+      missing) exec "$0" install-cli ;;
       *) die "varlatchCommand is \"$CMD\", which the plugin does not manage. Update it by hand." ;;
     esac
 
@@ -311,36 +414,10 @@ case "${1:-}" in
     if [ -n "$current" ] && ! version_gt "$target" "$current"; then
       echo "varlatch $current is up to date."; exit 0
     fi
-    node_major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
-    [ "$node_major" -ge 22 ] 2>/dev/null || die "the release CLI needs Node.js 22 or newer (found: $(node --version 2>/dev/null || echo none))."
+    need_node
 
-    asset="varlatch-cli-$target.cjs"
-    base="https://github.com/$RELEASE_REPO/releases/download/v$target"
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-    echo "Downloading $asset from $RELEASE_REPO..."
-    curl -fsL -o "$tmp/$asset" "$base/$asset" && curl -fsL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" \
-      || die "download failed."
-    curl -fsSL -o "$tmp/SHA256SUMS.sigstore.json" "$base/SHA256SUMS.sigstore.json" 2>/dev/null \
-      || rm -f "$tmp/SHA256SUMS.sigstore.json"
-
-    if [ -f "$tmp/SHA256SUMS.sigstore.json" ]; then
-      if command -v cosign >/dev/null 2>&1; then
-        cosign verify-blob "$tmp/SHA256SUMS" --bundle "$tmp/SHA256SUMS.sigstore.json" \
-          --certificate-identity "https://github.com/$RELEASE_REPO/.github/workflows/release.yml@refs/tags/v$target" \
-          --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null 2>&1 \
-          || die "the signature on SHA256SUMS does NOT verify. Nothing was installed."
-        signature="verified: signed by the $RELEASE_REPO release workflow for v$target"
-      else
-        signature="NOT checked: the release is signed, but cosign is not installed"
-      fi
-    else
-      signature="none: this release carries no signature"
-    fi
-    # Check this asset's own line; --ignore-missing would pass an unlisted file.
-    (cd "$tmp" && grep -E "^[0-9a-f]{64} [ *]$asset\$" SHA256SUMS | sha256sum --check --status) \
-      || die "$asset does not match SHA256SUMS. Nothing was installed."
-    got=$(node "$tmp/$asset" --version 2>/dev/null | sed -nE '1s/^varlatch ([0-9][^ ]*).*/\1/p')
-    [ "$got" = "$target" ] || die "the downloaded CLI reports version \"$got\", expected $target."
+    fetch_release "$target" "$tmp"
 
     echo
     echo "  varlatch ${current:-?} -> $target"
@@ -355,16 +432,90 @@ case "${1:-}" in
     read -rp "Install? [y/N] " answer
     [[ "$answer" =~ ^[yY] ]] || { echo "Nothing installed."; exit 130; }
 
-    # Write next to the target, then rename over it: never a half-written
-    # CLI, and a symlink is replaced rather than followed.
-    dir=$(dirname "$path"); sudo=""
-    [ -w "$dir" ] || { sudo="sudo"; echo "$dir is not writable; using sudo."; }
-    $sudo install -m 755 "$tmp/$asset" "$dir/.varlatch-new.$$" \
-      && $sudo mv -f "$dir/.varlatch-new.$$" "$path" \
-      || { $sudo rm -f "$dir/.varlatch-new.$$"; die "install failed."; }
+    put_cli "$tmp/$asset" "$path"
     echo "Installed: $(eval "$CMD --version")"
     "$0" version-info --force >/dev/null 2>&1
     refresh_version
+    ;;
+
+  install-cli)
+    # First run, in a terminal: install the release CLI where the docs put
+    # it (~/.local/bin/varlatch), at the version your server runs when you
+    # give its address, then offer the first sign-in.
+    set +e
+    read -r install path <<<"$(cli_install)"
+    case "$install" in
+      missing) ;;
+      release) exec "$0" upgrade-cli ;;
+      *) echo "varlatch is already installed ($(eval "$CMD --version" 2>/dev/null | head -n1))."; exit 0 ;;
+    esac
+
+    echo "Install the Varlatch CLI"
+    echo
+    echo "  The CLI should match the Varlatch your server runs. Give the server's"
+    echo "  address to install that version, or press Enter for the latest release."
+    echo
+    read -rp "Server address: " answer
+    server=$(normalize_server "$answer")
+    host=${server#*://}; host=${host%%/*}
+    target=""
+    if [ -n "$server" ]; then
+      target=$(server_version "$server")
+      if [ -z "$target" ]; then
+        echo "Could not read the version $host runs; using the latest release."
+      elif ! curl -fsIL --max-time 10 -o /dev/null \
+          "https://github.com/$RELEASE_REPO/releases/download/v$target/varlatch-cli-$target.cjs"; then
+        echo "$host runs $target, which has no release CLI; using the latest release."
+        echo "If the newer CLI does not work with it, upgrade the server (varlatch upgrade)."
+        target=""
+      else
+        echo "$host runs Varlatch $target."
+      fi
+    fi
+    [ -n "$target" ] || target=$(latest_release)
+    [ -n "$target" ] || die "cannot find the latest release of $RELEASE_REPO (offline?)."
+    target=${target#v}
+    need_node
+
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    fetch_release "$target" "$tmp"
+    dest="$HOME/.local/bin/varlatch"
+
+    echo
+    echo "  varlatch $target"
+    echo "  install:   $dest"
+    echo "  checksum:  ok (SHA256SUMS)"
+    echo "  signature: $signature"
+    echo "  changes:   $(release_url "$target")"
+    echo
+    read -rp "Install? [y/N] " answer
+    [[ "$answer" =~ ^[yY] ]] || { echo "Nothing installed."; exit 130; }
+
+    mkdir -p "$(dirname "$dest")"
+    put_cli "$tmp/$asset" "$dest"
+    echo "Installed: $("$dest" --version | head -n1)"
+
+    # The widget finds the CLI through a login shell's PATH; without
+    # ~/.local/bin on it, point the widget at the file instead.
+    found=$(bash -lc 'command -v varlatch' 2>/dev/null || true)
+    if [ -z "$found" ] || [ "$(readlink -f "$found")" != "$(readlink -f "$dest")" ]; then
+      if omarchy bar set varlatch varlatchCommand "$dest" >/dev/null 2>&1; then
+        echo "$(dirname "$dest") is not on your PATH, so the widget now runs $dest."
+      else
+        echo "$(dirname "$dest") is not on your PATH. Point the widget at the CLI:"
+        echo "  omarchy bar set varlatch varlatchCommand $dest"
+      fi
+    fi
+    "$0" version-info --force >/dev/null 2>&1; refresh_version; refresh_widget
+
+    [ -n "$server" ] || exit 0
+    remember_server "$server"
+    echo
+    read -rp "Sign in to $host now? [Y/n] " answer
+    [[ "$answer" =~ ^[nN] ]] && exit 0
+    # Detached, so the sign-in outlives this terminal; the panel shows it.
+    setsid "$0" login "$server" >/dev/null 2>&1 </dev/null &
+    echo "Your browser opens for the passkey prompt."
     ;;
 
   sync-menu)
@@ -381,9 +532,12 @@ menu_path = os.path.join(home, ".config/omarchy/extensions/omarchy-menu.jsonc")
 bin_path = os.path.join(home, ".config/omarchy/plugins/varlatch/bin/varlatch-menu")
 cmd = os.environ["VARLATCH_MENU_CMD"]
 
+cli_missing = False
 try:
     out = subprocess.run(["bash", "-lc", f"{cmd} status --json"],
                          capture_output=True, text=True, timeout=15)
+    # 127: the shell found no such command.
+    cli_missing = out.returncode == 127
     doc = json.loads(out.stdout) if out.returncode == 0 else {"servers": []}
 except Exception:
     doc = {"servers": []}
@@ -429,7 +583,9 @@ now = datetime.now(timezone.utc)
 expired = [s for s in servers if s.get("expired") is True]
 live = [s for s in servers if s.get("expired") is not True]
 
-if not servers:
+if cli_missing:
+    root_desc = "CLI not installed"
+elif not servers:
     root_desc = "Not logged in"
 elif len(servers) == 1:
     s = servers[0]
@@ -446,18 +602,28 @@ for i, s in enumerate(servers):
             else "Session EXPIRED — log in again",
         "action": f"{bin_path} status-notify",
     }))
-if not servers or expired:
+if cli_missing:
+    entries.append(("varlatch.install", {"icon": "\uf019", "label": "Install the CLI",
+        "description": "Download the release CLI, checked against its checksums",
+        "action": f"omarchy-launch-floating-terminal-with-presentation {bin_path} install-cli"}))
+elif not servers or expired:
     label = "Log in" if not live else "Log in again"
     target = (expired[0]["server"] if expired
               else servers[0]["server"] if servers
-              else remembered[0] if remembered else "")
-    entry = {"icon": "", "label": label, "description": "Browser passkey sign-in",
-             "action": f"{bin_path} login" + (f" {target}" if target else "")}
-    entries.append(("varlatch.login", entry))
+              else remembered[0] if remembered
+              else os.environ.get("VARLATCH_SERVER", ""))
+    if target:
+        entries.append(("varlatch.login", {"icon": "", "label": label,
+            "description": "Browser passkey sign-in", "action": f"{bin_path} login {target}"}))
+    else:
+        # No server yet: the panel asks for its address.
+        entries.append(("varlatch.connect", {"icon": "\uf0c1", "label": "Connect to a server",
+            "description": "Give its address in the Varlatch panel",
+            "action": "omarchy-shell varlatch connect"}))
 # Any live session can be renewed: a login to the same server, which
 # revokes the old credential once the new one is saved.
 for i, s in enumerate(live):
-    entries.append((f"varlatch.renew{i}", {"icon": "",
+    entries.append((f"varlatch.renew{i}", {"icon": "\uf021",
         "label": "Renew session" if len(live) == 1 else f"Renew {host(s['server'])}",
         "description": f"{host(s['server'])} — {left(s, now)} · browser passkey sign-in",
         "action": f"{bin_path} login {s['server']}"}))
@@ -490,7 +656,8 @@ if ver.get("updateAvailable") and ver.get("install") == "release":
 status = {"icon": "", "label": "Show full status", "action": f"{bin_path} status-notify"}
 if ver.get("current"):
     status["description"] = f"CLI {ver['current']}"
-entries.append(("varlatch.status", status))
+if not cli_missing:
+    entries.append(("varlatch.status", status))
 
 # Every entry ends with a comma, so the block stays valid wherever it sits:
 # the menu drops a trailing comma before the closing brace.
@@ -531,7 +698,7 @@ PY
     ;;
 
   *)
-    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-cancel|logout [server]|web|refresh|sync-menu|version-info [--force]|notify-update <current> <latest> <install>|upgrade-cli [version]>" >&2
+    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-cancel|login-check|logout [server]|web|refresh|sync-menu|version-info [--force]|notify-update <current> <latest> <install>|upgrade-cli [version]|install-cli>" >&2
     exit 1
     ;;
 esac
