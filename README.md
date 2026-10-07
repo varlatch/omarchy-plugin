@@ -159,6 +159,18 @@ Requires `jq`, `python3`, and the Varlatch CLI 0.8.0 or newer, which the
 panel can install (see [First run](#first-run)). With a CLI before 0.10.0,
 the widget works out the *expiring* state itself.
 
+## Development
+
+`tests/run.sh` tests the manifest and `bin/varlatch-menu` offline, each test
+in a throwaway `HOME` with stand-ins for the CLI (`tests/fake-varlatch`),
+`curl`, `notify-send`, and the omarchy commands. It needs `jq`, `python3`,
+and Node.js 22 or newer, and checks the QR code when `qrencode` is
+installed. CI runs it with `shellcheck` on every pull request. The QML is
+checked by hand on a live bar: `omarchy restart shell` after editing it,
+and `omarchy-shell varlatch debugState` for the widget's state.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for what changed in each release.
+
 ## License
 
 Copyright © 2026 Robotsson. Licensed under the Apache License 2.0; see
