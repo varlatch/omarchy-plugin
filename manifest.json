@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "varlatch",
   "name": "Varlatch",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": "Varlatch",
   "license": "Apache-2.0",
   "description": "Varlatch sessions in the Omarchy bar: which servers you hold credentials for, when they expire, and quick sign-in and sign-out, all read offline from `varlatch status --json`.",

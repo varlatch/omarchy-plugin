@@ -35,9 +35,12 @@ The Varlatch mark, icon only, with its state told by color:
 - **red, dimmed:** the `varlatch` CLI is missing or too old
 
 A left click opens a panel under the widget with one row per session: a
-live countdown, sign-out and sign-in per server, a **renew** button for
-every live session, and buttons to verify credentials and open the
-dashboard, and **add server** to sign in to one more. A middle click opens
+live countdown, **renew** (or **log in** once expired), and **⋯** for the
+row's other actions: **copy address**, **other device**, **log out**, and
+with several servers **dashboard** for that server. The host name opens
+that server's dashboard too. Above the rows, **verify** checks every stored
+credential and **dashboard** opens your server (with one server); below
+them, **add server** signs in to one more. A middle click opens
 the **Varlatch** submenu of the Omarchy menu, which SUPER+SPACE also finds.
 The widget keeps that submenu in step with your sessions. After a full
 sign-out, "Log in" still targets the last server you used, remembered in
@@ -95,9 +98,10 @@ device**, and **cancel**. The result arrives as a notification.
 
 When the browser on this machine has no passkey for your server, sign in
 from another device instead: **other device** on the panel while a sign-in
-waits, **Log in from another device** in the menu, or **Use another
-device** on a failed sign-in's notification (the expiry notifications have
-an **Another device** button too). The panel shows an address, a code, and,
+waits, in a row's **⋯**, or next to **log in** when logged out; **Log in
+from another device** in the menu; or **Use another device** on a failed
+sign-in's notification (the expiry notifications have an **Another device**
+button too). The panel shows an address, a code, and,
 with `qrencode` installed, a QR code of the address for a phone's camera.
 Open the address on any device, sign in with your passkey, enter the code,
 and approve. The widget collects the new credential, and as with a browser
@@ -154,6 +158,13 @@ outside it stays yours.
 
 Update with `omarchy plugin update varlatch`; remove with
 `omarchy plugin remove varlatch`, then delete the managed block.
+
+The shell keeps running the widget code it loaded until it restarts, even
+after an update. The widget notices newer code on disk within a minute (or
+when you open the panel) and shows "Varlatch for Omarchy 0.5.0 is
+installed" with **restart**, a **Restart to load** row in the menu, and one
+notification with **Restart now**; all three run `omarchy restart shell`.
+A sign-in under way survives the restart.
 
 Requires `jq`, `python3`, and the Varlatch CLI 0.8.0 or newer, which the
 panel can install (see [First run](#first-run)). With a CLI before 0.10.0,
