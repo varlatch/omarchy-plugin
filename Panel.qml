@@ -32,13 +32,13 @@ Panel {
   // Live countdowns while open.
   property double nowMs: Date.now()
   Timer { interval: 10000; running: root.opened; repeat: true; onTriggered: root.nowMs = Date.now() }
-  // Opening also re-reads the CLI version (offline; the release check stays
-  // cached), so a CLI updated outside the plugin shows at once instead of
-  // at the next hourly check.
+  // Opening also re-reads the CLI version, so a CLI updated outside the
+  // plugin shows at once, and (checkUpdates on) checks for a release when
+  // the last check is over an hour old, instead of up to 12 hours.
   onOpenedChanged: {
     if (opened) {
       nowMs = Date.now()
-      if (hostWidget) hostWidget.refreshVersion()
+      if (hostWidget) hostWidget.refreshVersion(3600)
     } else {
       connecting = false
       connectError = ""

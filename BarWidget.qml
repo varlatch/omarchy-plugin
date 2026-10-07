@@ -62,9 +62,20 @@ BarWidget {
   property string releaseUrl: ""
   readonly property bool canUpgrade: updateAvailable && cliInstall === "release"
 
+  // maxAge (seconds, optional): check for a release when the last check
+  // is older than that. Without it, the helper's background default
+  // applies. The helper never checks more than once an hour.
   property bool _versionQueued: false
-  function refreshVersion() {
-    if (versionProc.running) { _versionQueued = true; return }
+  property int _queuedMaxAge: 0
+  property int _versionMaxAge: 0
+  function refreshVersion(maxAge) {
+    var age = maxAge > 0 ? maxAge : 0
+    if (versionProc.running) {
+      _versionQueued = true
+      if (age > 0 && (_queuedMaxAge === 0 || age < _queuedMaxAge)) _queuedMaxAge = age
+      return
+    }
+    _versionMaxAge = age
     versionProc.running = true
   }
 
@@ -91,7 +102,8 @@ BarWidget {
   Process {
     id: versionProc
     running: false
-    command: ["bash", "-lc", "'" + root.menuHelper + "' version-info"]
+    command: ["bash", "-lc", "'" + root.menuHelper + "' version-info"
+      + (root._versionMaxAge > 0 ? " --max-age " + root._versionMaxAge : "")]
     stdout: StdioCollector { id: versionStdout; waitForEnd: true }
     onExited: function (exitCode) {
       var doc = null
@@ -101,7 +113,12 @@ BarWidget {
       root.latestVersion = doc ? doc.latest || "" : ""
       root.updateAvailable = doc ? doc.updateAvailable === true : false
       root.releaseUrl = doc ? doc.releaseUrl || "" : ""
-      if (root._versionQueued) { root._versionQueued = false; Qt.callLater(root.refreshVersion) }
+      if (root._versionQueued) {
+        var age = root._queuedMaxAge
+        root._versionQueued = false
+        root._queuedMaxAge = 0
+        Qt.callLater(function () { root.refreshVersion(age) })
+      }
     }
   }
 
