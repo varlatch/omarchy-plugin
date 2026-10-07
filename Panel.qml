@@ -259,9 +259,7 @@ Panel {
           Text {
             width: parent.width
             elide: Text.ElideRight
-            text: !pendingBlock.p ? ""
-              : pendingBlock.device ? "Sign in to " + root.shortHost(pendingBlock.p.server) + " from another device"
-              : "Signing in to " + root.shortHost(pendingBlock.p.server)
+            text: pendingBlock.p ? "Signing in to " + root.shortHost(pendingBlock.p.server) : ""
             color: root.fg
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -271,7 +269,7 @@ Panel {
             width: parent.width
             wrapMode: Text.WordWrap
             text: pendingBlock.device
-              ? "On any device, open this address, sign in with your passkey, and enter the code."
+              ? "From another device: open this address, sign in with your passkey, and enter the code."
               : "Finish in your browser."
             color: root.dim
             font.family: root.fontFamily
