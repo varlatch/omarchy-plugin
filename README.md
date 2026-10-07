@@ -37,10 +37,26 @@ The Varlatch mark, icon only, with its state told by color:
 A left click opens a panel under the widget with one row per session: a
 live countdown, sign-out and sign-in per server, a **renew** button for
 every live session, and buttons to verify credentials and open the
-dashboard. A middle click opens the **Varlatch** submenu of the Omarchy
-menu, which SUPER+SPACE also finds. The widget keeps that submenu in step
-with your sessions. After a full sign-out, "Log in" still targets the last
-server you used, remembered in `~/.local/state/varlatch-omarchy/servers.json`.
+dashboard, and **add server** to sign in to one more. A middle click opens
+the **Varlatch** submenu of the Omarchy menu, which SUPER+SPACE also finds.
+The widget keeps that submenu in step with your sessions. After a full
+sign-out, "Log in" still targets the last server you used, remembered in
+`~/.local/state/varlatch-omarchy/servers.json`.
+
+## First run
+
+Without the `varlatch` CLI, the panel offers **install CLI**. It opens a
+terminal that asks for your server's address, so it can install the CLI
+version that server runs (press Enter for the latest release). It then
+downloads the release CLI and checks it the same way an update does (see
+below), installs it as `~/.local/bin/varlatch` once you confirm, and offers
+the first sign-in. When `~/.local/bin` is not on your `PATH`, it points the
+widget at the file instead. The release CLI needs Node.js 22 or newer; on
+Omarchy, `omarchy install dev-env node` installs it.
+
+With the CLI but no server known yet, the panel asks for the server's
+address, and **connect** starts the browser sign-in. The menu's
+**Connect to a server** row opens the same form.
 
 "Verify" runs `varlatch status --probe`: one authenticated request per
 stored credential, to check that it is still valid and its server
@@ -120,8 +136,9 @@ outside it stays yours.
 Update with `omarchy plugin update varlatch`; remove with
 `omarchy plugin remove varlatch`, then delete the managed block.
 
-Requires `jq`, `python3`, and the Varlatch CLI 0.8.0 or newer. With a CLI
-before 0.10.0, the widget works out the *expiring* state itself.
+Requires `jq`, `python3`, and the Varlatch CLI 0.8.0 or newer, which the
+panel can install (see [First run](#first-run)). With a CLI before 0.10.0,
+the widget works out the *expiring* state itself.
 
 ## License
 

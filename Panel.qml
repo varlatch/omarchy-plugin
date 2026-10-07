@@ -35,9 +35,14 @@ Panel {
   // Opening also re-reads the CLI version (offline; the release check stays
   // cached), so a CLI updated outside the plugin shows at once instead of
   // at the next hourly check.
-  onOpenedChanged: if (opened) {
-    nowMs = Date.now()
-    if (hostWidget) hostWidget.refreshVersion()
+  onOpenedChanged: {
+    if (opened) {
+      nowMs = Date.now()
+      if (hostWidget) hostWidget.refreshVersion()
+    } else {
+      connecting = false
+      connectError = ""
+    }
   }
 
   function shortHost(url) { return hostWidget ? hostWidget.shortHost(url) : String(url) }
@@ -59,6 +64,55 @@ Panel {
 
   readonly property var expiredServers: servers.filter(function (s) { return s.expired === true })
   readonly property bool loginUseful: servers.length === 0 || expiredServers.length > 0
+
+  readonly property bool cliMissing: hostWidget ? hostWidget.cliMissing : false
+  readonly property bool cliUsable: sessionState !== "unavailable" && sessionState !== "unsupported"
+  readonly property string knownServer: hostWidget ? hostWidget.knownServer : ""
+
+  // ---- Server address form: the first sign-in (no server known yet) or
+  // another server. Submitting starts the usual browser sign-in.
+  property bool connecting: false
+  property string connectError: ""
+  readonly property bool connectShown: cliUsable && pendingLogin === null
+    && (connecting || (servers.length === 0 && knownServer === ""))
+  // Something to go back to, so the form gets a cancel.
+  readonly property bool connectCancellable: servers.length > 0 || knownServer !== ""
+
+  function startConnect() {
+    connecting = true
+    connectError = ""
+    if (!opened) open()
+    Qt.callLater(function () { if (connectField) connectField.forceActiveFocus() })
+  }
+
+  // For the widget's debugState.
+  readonly property bool connectFocused: connectField.activeFocus
+
+  function stopConnect() {
+    connecting = false
+    connectError = ""
+    connectField.text = ""
+    Qt.callLater(function () { if (keyCatcher) keyCatcher.forceActiveFocus() })
+  }
+
+  // "https://varlatch.example.com" from what was typed; empty when it
+  // cannot be a server address.
+  function normalizedServer(text) {
+    var s = String(text || "").replace(/\s+/g, "").replace(/\/+$/, "")
+    if (s === "") return ""
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = "https://" + s
+    return /^https?:\/\/[^\/?#]+(\/[^?#]*)?$/i.test(s) ? s : ""
+  }
+
+  function submitConnect() {
+    var url = normalizedServer(connectField.text)
+    if (!url) {
+      connectError = "Give the server's address, such as varlatch.example.com"
+      return
+    }
+    act(["login", url])
+    stopConnect()
+  }
 
   component Chip: Rectangle {
     property string label: ""
@@ -92,13 +146,17 @@ Panel {
     bar: root.bar
     open: root.opened
     centerOnBar: false
-    focusTarget: keyCatcher
+    // With the address form showing (no server known yet, or "add
+    // server"), typing goes straight into it.
+    focusTarget: root.connectShown ? connectField : keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(340))
     contentHeight: panel.fittedContentHeight(Math.min(mainColumn.implicitHeight + Style.space(24), Style.space(560)))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // Keys go to the address field while it has focus.
+      blocked: connectField.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
 
@@ -305,24 +363,138 @@ Panel {
           }
         }
 
-        // ---- Empty state
+        // ---- Another server, below the sessions.
+        Item {
+          visible: root.servers.length > 0 && !root.connectShown && root.pendingLogin === null
+          width: parent.width
+          height: addServer.implicitHeight
+          Chip {
+            id: addServer
+            anchors.right: parent.right
+            label: "add server"
+            onClicked: root.startConnect()
+          }
+        }
+
+        // ---- No sessions: install or update the CLI, or log in again.
         Column {
-          visible: root.servers.length === 0
+          visible: root.servers.length === 0 && root.pendingLogin === null && !root.connectShown
           width: parent.width
           spacing: Style.space(8)
           Text {
-            visible: root.pendingLogin === null
-            text: root.sessionState === "unavailable" || root.sessionState === "unsupported"
-              ? "varlatch CLI unavailable"
+            width: parent.width
+            elide: Text.ElideRight
+            text: root.cliMissing ? "The varlatch CLI is not installed"
+              : root.sessionState === "unsupported" ? "This varlatch CLI is too old"
+              : root.sessionState === "unavailable" ? "varlatch CLI unavailable"
+              : root.knownServer ? "Not logged in to " + root.shortHost(root.knownServer)
               : "Not logged in"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
           }
-          Chip {
-            label: "log in"
-            visible: root.sessionState === "none" && root.pendingLogin === null
-            onClicked: root.act(["login"])
+          Text {
+            visible: text !== ""
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: root.cliMissing
+              ? "Install the release CLI, checked against its checksums, to ~/.local/bin."
+              : !root.cliUsable && root.hostWidget ? root.hostWidget.errorDetail : ""
+            color: root.cliMissing ? root.dim : root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+          Row {
+            spacing: Style.space(6)
+            Chip {
+              label: "install CLI"
+              visible: root.cliMissing
+              onClicked: { root.hostWidget.installCli(); root.close() }
+            }
+            Chip {
+              label: "update CLI"
+              visible: root.sessionState === "unsupported" && !!root.hostWidget && root.hostWidget.cliInstall === "release"
+              onClicked: { root.hostWidget.upgradeCli(); root.close() }
+            }
+            Chip {
+              label: "log in"
+              visible: root.sessionState === "none" && root.knownServer !== "" && !root.connecting
+              onClicked: root.act(["login", root.knownServer])
+            }
+            Chip {
+              label: "other server"
+              visible: root.sessionState === "none" && root.knownServer !== "" && !root.connecting
+              onClicked: root.startConnect()
+            }
+          }
+        }
+
+        // ---- Server address form.
+        Column {
+          visible: root.connectShown
+          width: parent.width
+          spacing: Style.space(6)
+
+          Text {
+            width: parent.width
+            text: root.servers.length > 0 ? "Connect another server" : "Connect to your Varlatch server"
+            color: root.fg
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Item {
+            width: parent.width
+            height: Math.max(connectField.implicitHeight, connectChips.implicitHeight)
+
+            TextField {
+              id: connectField
+              anchors.left: parent.left
+              anchors.right: connectChips.left
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              placeholderText: "varlatch.example.com"
+              foreground: root.fg
+              font.family: root.fontFamily
+              inputMethodHints: Qt.ImhUrlCharactersOnly | Qt.ImhNoAutoUppercase
+              onTextChanged: root.connectError = ""
+              Keys.onPressed: function (event) {
+                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                  root.submitConnect()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Escape) {
+                  if (root.connectCancellable) root.stopConnect()
+                  else root.close()
+                  event.accepted = true
+                }
+              }
+            }
+
+            Row {
+              id: connectChips
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(6)
+              Chip {
+                label: "connect"
+                onClicked: root.submitConnect()
+              }
+              Chip {
+                label: "cancel"
+                visible: root.connectCancellable
+                onClicked: root.stopConnect()
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: root.connectError !== "" ? root.connectError
+              : "Your browser opens for the passkey sign-in."
+            color: root.connectError !== "" ? root.urgent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
           }
         }
 
