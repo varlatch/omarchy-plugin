@@ -62,13 +62,13 @@ files only (`~/.config/varlatch/credentials.json` and repository-local
 state). It never uses a stored credential on its own; the only network
 requests are the ones you start with a click, and, with `checkUpdates` on,
 an anonymous check for the latest release at most twice a day, cached in
-`~/.local/state/varlatch-omarchy/update.json`. While the Varlatch
-repository is private, the check and the download go through the GitHub
-CLI (`gh`) if it is signed in; once it is public, they need nothing.
+`~/.local/state/varlatch-omarchy/update.json`.
 
 ## Settings
 
-Set these on the widget's entry in `~/.config/omarchy/shell.json`:
+Set these with `omarchy bar set varlatch <key> <value>` (add `--json` for
+`refreshIntervalSec`), or on the widget's entry in
+`~/.config/omarchy/shell.json`:
 
 - `refreshIntervalSec`: how often to poll, in seconds (default 30, minimum
   15).
@@ -86,16 +86,22 @@ Set these on the widget's entry in `~/.config/omarchy/shell.json`:
 
 ## Install
 
-1. Clone this repository into `~/.config/omarchy/plugins/varlatch`.
-2. Add `{ "id": "varlatch" }` to a bar section in
-   `~/.config/omarchy/shell.json`.
-3. Append the entries from `menu-entries.jsonc.example` to
-   `~/.config/omarchy/extensions/omarchy-menu.jsonc`, replacing
-   `/home/USER` with your home directory. The widget rewrites that block
-   from then on.
+```bash
+omarchy plugin add https://github.com/varlatch/omarchy-plugin.git --enable
+```
 
-Requires `jq` and the Varlatch CLI 0.8.0 or newer. With a CLI before 0.10.0,
-the widget works out the *expiring* state itself.
+This clones the plugin into `~/.config/omarchy/plugins/varlatch` and puts
+the widget on the bar. The widget adds its **Varlatch** submenu to
+`~/.config/omarchy/extensions/omarchy-menu.jsonc` by itself, as a managed
+block between `// >>> varlatch plugin` and `// <<< varlatch plugin` that it
+rewrites as your sessions change. Leave that block alone; everything
+outside it stays yours.
+
+Update with `omarchy plugin update varlatch`; remove with
+`omarchy plugin remove varlatch`, then delete the managed block.
+
+Requires `jq`, `python3`, and the Varlatch CLI 0.8.0 or newer. With a CLI
+before 0.10.0, the widget works out the *expiring* state itself.
 
 ## License
 
