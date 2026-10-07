@@ -73,6 +73,13 @@ BarWidget {
       root.menuHelper + " upgrade-cli " + root.latestVersion])
   }
 
+  // Device sign-in (login --start / --wait) arrived in CLI 0.14.0.
+  readonly property bool deviceSignIn: {
+    var parts = String(cliVersion).split("-")[0].split(".").map(function (n) { return parseInt(n, 10) })
+    if (parts.length < 3 || parts.some(isNaN)) return false
+    return parts[0] > 0 || parts[1] > 14 || (parts[1] === 14 && parts[2] >= 0)
+  }
+
   // First run: no CLI on PATH. The helper installs the release build in a
   // terminal, after the same checks as an update.
   readonly property bool cliMissing: sessionState === "unavailable" && cliInstall === "missing"
