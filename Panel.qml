@@ -491,8 +491,10 @@ Panel {
                 }
                 Timer { id: copiedTimer; interval: 1500; onTriggered: copyChip.copied = false }
               }
+              // With one server, the header's dashboard is this one.
               Chip {
                 label: "dashboard"
+                visible: root.servers.length > 1
                 onClicked: { root.act(["web", sessionRow.modelData.server]); root.close() }
               }
             }
