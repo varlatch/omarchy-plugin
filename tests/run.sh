@@ -299,6 +299,32 @@ check "CLI 0.13.0: no device button on a failure" "! calls | grep notify-send | 
 check "expiry notification: Renew now and Another device" "calls | grep -q -- '-A login=Renew now -A device=Another device --wait'"
 
 # --------------------------------------------------------------------------
+section "plugin updates (plugin-info, notify-plugin-update)"
+new_home
+# A copy of the plugin, so the test can change its files.
+COPY="$T/plugin-copy"; mkdir -p "$COPY"
+cp -R "$ROOT/bin" "$ROOT/manifest.json" "$COPY/"; cp "$ROOT"/*.qml "$COPY/"
+info() { "$COPY/bin/varlatch-menu" plugin-info; }
+first=$(info)
+check "plugin-info: version and a code fingerprint" \
+  "jq -e --arg v \"\$(jq -r .version '$ROOT/manifest.json')\" '.version == \$v and (.code | test(\"^[0-9a-f]{64}$\"))' <<<'$first' >/dev/null"
+echo "# notes" >> "$COPY/README.md"
+check "a change outside the manifest and QML keeps the fingerprint" '[ "$(info)" = "$first" ]'
+echo "// changed" >> "$COPY/Panel.qml"
+check "a QML change changes the fingerprint" '[ "$(info | jq -r .code)" != "$(jq -r .code <<<"$first")" ]'
+: > "$T/calls.log"; FAKE_CHOICE=restart "$H" notify-plugin-update 9.9.9
+check "notification offers Restart now and restarts the shell" \
+  "calls | grep -q -- '-A restart=Restart now --wait Varlatch Varlatch for Omarchy 9.9.9 is installed' && calls | grep -q '^omarchy restart shell'"
+: > "$T/calls.log"; FAKE_CHOICE='' "$H" notify-plugin-update 9.9.9
+check "dismissed: no restart" "! calls | grep -q '^omarchy restart shell'"
+session https://vl.example.com false
+"$H" sync-menu --restart 9.9.9
+check "menu: Restart to load the newer copy" \
+  "menu_has '.[\"varlatch.restart\"] | (.action == \"omarchy restart shell\") and (.label | endswith(\"9.9.9\")) and .icon != \"\"'"
+"$H" sync-menu
+check "menu: no restart row without newer code" "menu_has 'has(\"varlatch.restart\") | not'"
+
+# --------------------------------------------------------------------------
 section "release check (version-info)"
 new_home
 widget '{"checkUpdates": "on"}'
