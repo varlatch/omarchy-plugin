@@ -1,9 +1,29 @@
-# Varlatch for Omarchy
+<p align="center">
+  <img src="assets/varlatch-mark.png" width="64" alt="">
+</p>
 
-Shows your [Varlatch](https://github.com/varlatch/varlatch) sessions in the
-Omarchy bar: which servers you are signed in to, when each credential
-expires, and one-click sign-in, renewal, and sign-out. Everything it shows
-comes from `varlatch status --json`.
+<h1 align="center">Varlatch for Omarchy</h1>
+
+<p align="center">
+  Your <a href="https://github.com/varlatch/varlatch">Varlatch</a> sessions in the Omarchy bar:
+  which servers you are signed in to, when each credential expires,
+  and one-click sign-in, renewal, and sign-out.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
+  <a href="https://github.com/varlatch/varlatch/releases/latest"><img src="https://img.shields.io/github/v/release/varlatch/varlatch?label=varlatch%20CLI" alt="Latest Varlatch CLI release"></a>
+</p>
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="The Varlatch icon in the Omarchy bar, in amber, with its panel open: two sessions with time left, renew and log out buttons, and the CLI version">
+</p>
+
+```bash
+omarchy plugin add https://github.com/varlatch/omarchy-plugin.git --enable
+```
+
+Everything it shows comes from `varlatch status --json`; see [Install](#install).
 
 ## What it shows
 
