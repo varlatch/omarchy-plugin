@@ -135,6 +135,26 @@ release_url() { echo "https://github.com/$RELEASE_REPO/releases/tag/v$1"; }
 
 refresh_version() { omarchy-shell varlatch refreshVersion >/dev/null 2>&1 || true; }
 
+# " --ttl <seconds>" from the widget's sessionHours setting; nothing for 0
+# or unset, which leaves the length to the server (12 hours by default).
+ttl_flag() {
+  local hours
+  hours=$(widget_setting sessionHours 0)
+  if [[ "$hours" =~ ^[0-9]+$ ]] && [ "$hours" -ge 1 ] && [ "$hours" -le 24 ]; then
+    echo " --ttl $((hours * 3600))"
+  fi
+  return 0
+}
+
+# Device sign-in (login --start / --wait) arrived in CLI 0.14.0.
+device_capable() {
+  local v
+  v=$(cli_version)
+  [ -n "$v" ] && ! version_gt 0.14.0 "$v"
+}
+
+host_of() { local h=${1#*://}; echo "${h%%/*}"; }
+
 # The version a server runs, from its anonymous /v1/meta; empty when it
 # cannot be read.
 server_version() {
@@ -247,7 +267,7 @@ case "${1:-}" in
     log=$(mktemp)
     trap 'rm -f "$log"; login_idle; refresh_widget' EXIT
     # Own session, so cancel can signal the whole process group.
-    setsid bash -c "exec $CMD login --server '$server'" >"$log" 2>&1 </dev/null &
+    setsid bash -c "exec $CMD login --server '$server'$(ttl_flag)" >"$log" 2>&1 </dev/null &
     cli=$!
     write_login() {
       jq -n --arg s "$server" --arg u "$1" --argjson p "$cli" --arg b "$(boot_id)" \
@@ -263,23 +283,114 @@ case "${1:-}" in
       sleep 0.3
     done
     rc=0; wait "$cli" || rc=$?
-    host=${server#*://}; host=${host%%/*}
+    host=$(host_of "$server")
     if [ "$rc" -eq 0 ]; then
       # Surface a failed revoke of the replaced credential, if any.
       warn=$(grep '^varlatch:' "$log" || true)
       notify "Logged in to $host.${warn:+ $warn}"
     elif [ "$rc" -eq 143 ]; then
+      # Quiet when a device sign-in took over.
+      jq -e '.replaced == true' "$LOGIN_FILE" >/dev/null 2>&1 || notify "Sign-in to $host cancelled."
+    else
+      msg="Sign-in to $host failed: $(grep -v '^ ' "$log" | tail -n 2 | tr '\n' ' ')"
+      if device_capable; then
+        # The notification waits for an answer, so end this sign-in first.
+        rm -f "$log"; trap - EXIT; login_idle; refresh_widget
+        choice=$(notify-send -a Varlatch -u critical -A "device=Use another device" --wait "Varlatch" "$msg" || true)
+        [ "$choice" = "device" ] && exec "$0" login-device "$server"
+      else
+        notify-send -a Varlatch -u critical "Varlatch" "$msg"
+      fi
+    fi
+    ;;
+
+  login-device)
+    # Device sign-in (CLI 0.14.0+): the CLI gets an address and a code, you
+    # sign in with your passkey in a browser on any device (a phone works)
+    # and approve the code, and `--wait` collects the credential. Like the
+    # browser flow, it revokes the credential it replaces only once the new
+    # one is saved. The panel shows the address, the code, and a QR code.
+    server="${2:-$(login_server)}"
+    if [ -z "$server" ]; then
+      omarchy-shell varlatch connect >/dev/null 2>&1 \
+        || notify "No server known. Open the Varlatch panel in the bar to connect to one."
+      exit 0
+    fi
+    host=$(host_of "$server")
+    device_capable || { notify "Signing in from another device needs Varlatch CLI 0.14.0 or newer."; exit 1; }
+    mkdir -p "$STATE_DIR"
+    # Replaces a browser sign-in still waiting: "other device" on the panel.
+    # Wait for its helper to finish, so its cleanup cannot clear ours.
+    if login_running; then
+      "$0" login-cancel --replace
+      for _ in $(seq 1 25); do
+        jq -e '.state == "pending"' "$LOGIN_FILE" >/dev/null 2>&1 || break
+        sleep 0.2
+      done
+    fi
+    out=$(mktemp); err=$(mktemp); qr=""
+    trap 'rm -f "$out" "$err" "$qr"; login_idle; refresh_widget' EXIT
+    if ! eval "$CMD login --server '$server' --start --json$(ttl_flag)" >"$out" 2>"$err"; then
+      notify-send -a Varlatch -u critical "Varlatch" \
+        "Sign-in to $host failed: $(grep -v '^ ' "$err" | tail -n 2 | tr '\n' ' ')"
+      exit 1
+    fi
+    uri=$(jq -r '.verificationUri // empty' "$out" 2>/dev/null || true)
+    code=$(jq -r '.userCode // empty' "$out" 2>/dev/null || true)
+    expires=$(jq -r '.expiresAt // empty' "$out" 2>/dev/null || true)
+    if [ -z "$uri" ] || [ -z "$code" ]; then
+      notify-send -a Varlatch -u critical "Varlatch" "Sign-in to $host failed: the CLI gave no address and code."
+      exit 1
+    fi
+    # The address only, for a phone's camera; the code is typed in by hand.
+    # Named after the code, so the panel never shows an earlier one.
+    qr="$STATE_DIR/device-qr-$code.png"
+    if command -v qrencode >/dev/null 2>&1; then
+      qrencode -o "$qr" -s 8 -m 2 "$uri" 2>/dev/null || rm -f "$qr"
+    fi
+    # Own session, so cancel can signal the whole process group.
+    setsid "$0" device-wait "$server" >"$out" 2>"$err" </dev/null &
+    waiter=$!
+    jq -n --arg s "$server" --arg u "$uri" --arg c "$code" --arg e "$expires" \
+      --arg q "$([ -f "$qr" ] && echo "$qr")" --argjson p "$waiter" --arg b "$(boot_id)" \
+      '{state: "pending", mode: "device", server: $s, url: $u, code: $c, expiresAt: $e,
+        qr: $q, pid: $p, boot: $b}' > "$LOGIN_FILE"
+    rc=0; wait "$waiter" || rc=$?
+    state=$(tail -n 1 "$out" | jq -r '.state // empty' 2>/dev/null || true)
+    if [ "$rc" -eq 0 ]; then
+      warn=$(grep '^varlatch:' "$err" || true)
+      notify "Logged in to $host.${warn:+ $warn}"
+    elif [ "$rc" -eq 143 ]; then
       notify "Sign-in to $host cancelled."
     else
-      notify-send -a Varlatch -u critical "Varlatch" \
-        "Sign-in to $host failed: $(grep -v '^ ' "$log" | tail -n 2 | tr '\n' ' ')"
+      case "$state" in
+        denied) msg="Sign-in to $host was denied." ;;
+        expired) msg="The sign-in code for $host expired before it was approved." ;;
+        *) msg="Sign-in to $host failed: $(grep -v '^ ' "$err" | tail -n 2 | tr '\n' ' ')" ;;
+      esac
+      notify-send -a Varlatch -u critical "Varlatch" "$msg"
     fi
+    ;;
+
+  device-wait)
+    # Collect an approved device sign-in. `--wait` gives up at its timeout
+    # with 75 while the code is still waiting, so ask again.
+    set +e
+    while :; do
+      eval "$CMD login --server '${2:?server}' --wait --timeout 600 --json"
+      rc=$?
+      [ "$rc" -eq 75 ] || exit "$rc"
+    done
     ;;
 
   login-cancel)
     # A sign-in whose process is already gone only needs forgetting.
     login_running || { login_idle; exit 0; }
     pid=$(jq -r '.pid' "$LOGIN_FILE")
+    # --replace: another sign-in takes over, so the cancelled one stays quiet.
+    if [ "${2:-}" = --replace ]; then
+      jq '.replaced = true' "$LOGIN_FILE" > "$LOGIN_FILE.tmp" && mv -f "$LOGIN_FILE.tmp" "$LOGIN_FILE"
+    fi
     kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
     ;;
 
@@ -299,8 +410,12 @@ case "${1:-}" in
     server="${2:?server}"; state="${3:?state}"; msg="${4:?message}"
     if [ "$state" = "expired" ]; then urgency=critical; label="Log in"
     else urgency=normal; label="Renew now"; fi
-    choice=$(notify-send -a Varlatch -u "$urgency" -A "login=$label" --wait "Varlatch" "$msg" || true)
-    [ "$choice" = "login" ] && exec "$0" login "$server"
+    device=(); device_capable && device=(-A "device=Another device")
+    choice=$(notify-send -a Varlatch -u "$urgency" -A "login=$label" "${device[@]}" --wait "Varlatch" "$msg" || true)
+    case "$choice" in
+      login) exec "$0" login "$server" ;;
+      device) exec "$0" login-device "$server" ;;
+    esac
     ;;
 
   logout)
@@ -579,6 +694,21 @@ def left(s, now):
     h, m = int(ms // 3600), int(ms % 3600 // 60)
     return (f"{h}h {m}m left" if h else f"{m}m left")
 
+# CLI version and update, from the widget's last version-info.
+try:
+    ver = json.load(open(os.path.join(home, ".local/state/varlatch-omarchy/update.json"), encoding="utf-8"))
+except Exception:
+    ver = {}
+
+def at_least(version, want):
+    try:
+        return tuple(int(x) for x in str(version).split("-")[0].split(".")[:3]) >= want
+    except ValueError:
+        return False
+
+# Device sign-in (login --start / --wait) arrived in CLI 0.14.0.
+device = at_least(ver.get("current") or "", (0, 14, 0))
+
 now = datetime.now(timezone.utc)
 expired = [s for s in servers if s.get("expired") is True]
 live = [s for s in servers if s.get("expired") is not True]
@@ -615,6 +745,10 @@ elif not servers or expired:
     if target:
         entries.append(("varlatch.login", {"icon": "", "label": label,
             "description": "Browser passkey sign-in", "action": f"{bin_path} login {target}"}))
+        if device:
+            entries.append(("varlatch.device", {"icon": "\uf10b", "label": label + " from another device",
+                "description": "Approve with your passkey on any device, such as a phone",
+                "action": f"{bin_path} login-device {target}"}))
     else:
         # No server yet: the panel asks for its address.
         entries.append(("varlatch.connect", {"icon": "\uf0c1", "label": "Connect to a server",
@@ -644,11 +778,6 @@ if servers:
         "action": f"{bin_path} verify"}))
     entries.append(("varlatch.web", {"icon": "", "label": "Open dashboard",
         "action": f"{bin_path} web"}))
-# CLI version and update, from the widget's last version-info.
-try:
-    ver = json.load(open(os.path.join(home, ".local/state/varlatch-omarchy/update.json"), encoding="utf-8"))
-except Exception:
-    ver = {}
 if ver.get("updateAvailable") and ver.get("install") == "release":
     entries.append(("varlatch.update", {"icon": "", "label": "Update CLI",
         "description": f"{ver.get('current')} → {ver.get('latest')}",
@@ -698,7 +827,7 @@ PY
     ;;
 
   *)
-    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-cancel|login-check|logout [server]|web|refresh|sync-menu|version-info [--force]|notify-update <current> <latest> <install>|upgrade-cli [version]|install-cli>" >&2
+    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-device [server]|login-cancel|login-check|logout [server]|web|refresh|sync-menu|version-info [--force]|notify-update <current> <latest> <install>|upgrade-cli [version]|install-cli>" >&2
     exit 1
     ;;
 esac

@@ -28,7 +28,8 @@
       "notifyExpiry": "on",
       "showWhenLoggedOut": "on",
       "showLocalhost": "off",
-      "checkUpdates": "off"
+      "checkUpdates": "off",
+      "sessionHours": 0
     },
     "schema": [
       {
@@ -45,6 +46,15 @@
         "type": "string",
         "label": "varlatch command",
         "defaultValue": "varlatch"
+      },
+      {
+        "key": "sessionHours",
+        "type": "integer",
+        "label": "Session length in hours (0: the server's default)",
+        "min": 0,
+        "max": 24,
+        "step": 1,
+        "defaultValue": 0
       },
       {
         "key": "notifyExpiry",

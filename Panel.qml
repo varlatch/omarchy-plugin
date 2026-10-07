@@ -47,6 +47,15 @@ Panel {
 
   function shortHost(url) { return hostWidget ? hostWidget.shortHost(url) : String(url) }
 
+  // "Code expires in 9m" for a device sign-in's code.
+  function codeLeft(expiresAt) {
+    var ms = Date.parse(expiresAt) - nowMs
+    if (!isFinite(ms)) return ""
+    if (ms <= 0) return "Code expired"
+    var m = Math.floor(ms / 60000)
+    return m >= 1 ? "Code expires in " + m + "m" : "Code expires in under a minute"
+  }
+
   function remaining(s) {
     if (s.expired === true) return "EXPIRED"
     if (!s.expiresAt) return "no expiry recorded"
@@ -235,47 +244,117 @@ Panel {
           font.pixelSize: Style.font.caption
         }
 
-        // ---- Sign-in in flight: the browser has the passkey prompt; the
-        // link is here in case it opened in the wrong browser (or not at all).
+        // ---- Sign-in in flight. In the browser: the passkey prompt is
+        // there, and the link is here in case it opened in the wrong browser
+        // (or not at all). From another device: the address, the code to
+        // type there, and a QR code of the address for a phone's camera.
         Column {
-          visible: root.pendingLogin !== null
+          id: pendingBlock
+          readonly property var p: root.pendingLogin
+          readonly property bool device: !!p && p.mode === "device"
+          visible: p !== null
           width: parent.width
-          spacing: Style.space(4)
+          spacing: Style.space(6)
 
           Text {
             width: parent.width
             elide: Text.ElideRight
-            text: "Signing in to " + (root.pendingLogin ? root.shortHost(root.pendingLogin.server) : "")
+            text: !pendingBlock.p ? ""
+              : pendingBlock.device ? "Sign in to " + root.shortHost(pendingBlock.p.server) + " from another device"
+              : "Signing in to " + root.shortHost(pendingBlock.p.server)
             color: root.fg
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
+          }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: pendingBlock.device
+              ? "On any device, open this address, sign in with your passkey, and enter the code."
+              : "Finish in your browser."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Row {
+            visible: pendingBlock.device
+            width: parent.width
+            spacing: Style.space(12)
+
+            // White quiet zone around the code, whatever the theme.
+            Rectangle {
+              id: qrFrame
+              visible: pendingBlock.device && !!pendingBlock.p.qr
+              width: Style.space(112)
+              height: width
+              color: "white"
+              radius: Style.space(4)
+              Image {
+                anchors.fill: parent
+                anchors.margins: Style.space(4)
+                source: qrFrame.visible ? "file://" + pendingBlock.p.qr : ""
+                fillMode: Image.PreserveAspectFit
+                smooth: false
+                cache: false
+              }
+            }
+
+            Column {
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - (qrFrame.visible ? qrFrame.width + parent.spacing : 0)
+              spacing: Style.space(4)
+
+              Text {
+                width: parent.width
+                elide: Text.ElideRight
+                text: pendingBlock.device ? String(pendingBlock.p.url).replace(/^https:\/\//, "") : ""
+                color: root.fg
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+              Text {
+                text: pendingBlock.device ? pendingBlock.p.code : ""
+                color: root.fg
+                font.family: root.fontFamily
+                font.pixelSize: Math.round(Style.font.body * 1.6)
+                font.bold: true
+                font.letterSpacing: 2
+              }
+              Text {
+                text: pendingBlock.device ? root.codeLeft(pendingBlock.p.expiresAt) : ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
           }
 
           Item {
             width: parent.width
             height: pendingChips.implicitHeight
 
-            Text {
-              anchors.left: parent.left
-              anchors.right: pendingChips.left
-              anchors.rightMargin: Style.space(8)
-              anchors.verticalCenter: parent.verticalCenter
-              elide: Text.ElideRight
-              text: "Finish in your browser"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-
             Row {
               id: pendingChips
               anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(6)
               Chip {
+                label: "copy code"
+                visible: pendingBlock.device
+                onClicked: Quickshell.execDetached(["wl-copy", pendingBlock.p.code])
+              }
+              Chip {
                 label: "open link"
-                visible: root.pendingLogin !== null && !!root.pendingLogin.url
-                onClicked: { Quickshell.execDetached(["xdg-open", root.pendingLogin.url]); root.close() }
+                visible: !!pendingBlock.p && !!pendingBlock.p.url
+                onClicked: { Quickshell.execDetached(["xdg-open", pendingBlock.p.url]); root.close() }
+              }
+              // The browser here has no passkey, or the wrong one: approve
+              // from a phone or another computer instead.
+              Chip {
+                label: "other device"
+                visible: !pendingBlock.device && !!root.hostWidget && root.hostWidget.deviceSignIn
+                onClicked: root.act(["login-device", pendingBlock.p.server])
               }
               Chip {
                 label: "cancel"

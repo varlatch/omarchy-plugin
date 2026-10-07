@@ -88,8 +88,21 @@ yourself.
 
 Signing in needs no terminal window. The CLI opens your browser for the
 passkey prompt, and while it waits the panel shows "Signing in to …" with
-**open link**, for when the page opens in the wrong browser, and **cancel**.
-The result arrives as a notification.
+**open link**, for when the page opens in the wrong browser, **other
+device**, and **cancel**. The result arrives as a notification.
+
+## Sign in from another device
+
+When the browser on this machine has no passkey for your server, sign in
+from another device instead: **other device** on the panel while a sign-in
+waits, **Log in from another device** in the menu, or **Use another
+device** on a failed sign-in's notification (the expiry notifications have
+an **Another device** button too). The panel shows an address, a code, and,
+with `qrencode` installed, a QR code of the address for a phone's camera.
+Open the address on any device, sign in with your passkey, enter the code,
+and approve. The widget collects the new credential, and as with a browser
+sign-in, the CLI revokes the credential it replaces only once the new one is
+saved. The code lasts 10 minutes. This needs Varlatch CLI 0.14.0 or newer.
 
 ## Privacy
 
@@ -103,7 +116,7 @@ an anonymous check for the latest release at most twice a day, cached in
 ## Settings
 
 Set these with `omarchy bar set varlatch <key> <value>` (add `--json` for
-`refreshIntervalSec`), or on the widget's entry in
+`refreshIntervalSec` and `sessionHours`), or on the widget's entry in
 `~/.config/omarchy/shell.json`:
 
 - `refreshIntervalSec`: how often to poll, in seconds (default 30, minimum
@@ -111,6 +124,9 @@ Set these with `omarchy bar set varlatch <key> <value>` (add `--json` for
 - `varlatchCommand`: the CLI to run (default `varlatch` on your `PATH`). For
   a development build, use for example
   `node /path/to/varlatch/apps/cli/dist/main.js`.
+- `sessionHours`: how long a new sign-in lasts, from 1 to 24 hours (default
+  0: the server's default, 12 hours). Applies to every sign-in the widget
+  starts, renewals included.
 - `notifyExpiry`: `on` or `off`.
 - `showWhenLoggedOut`: `on` or `off`. With `off`, the widget hides entirely
   when no credentials are stored.
