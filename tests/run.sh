@@ -178,6 +178,7 @@ session https://vl.example.com false
 "$H" sync-menu
 check "live session: session, renew, log out, verify, dashboard" \
   "menu_has 'has(\"varlatch.session0\") and has(\"varlatch.renew0\") and has(\"varlatch.logout\") and has(\"varlatch.verify\") and has(\"varlatch.web\") and (has(\"varlatch.connect\") | not)'"
+check "one server: Open dashboard opens it" "menu_has '.[\"varlatch.web\"].action | endswith(\"web https://vl.example.com\")'"
 check "every row has a glyph" "menu_has '[to_entries[] | select(.key | startswith(\"varlatch\")) | .value.icon] | all(. != \"\")'"
 # shellcheck disable=SC2034 # read by check
 before=$(cat "$MENU"); "$H" sync-menu
@@ -190,6 +191,16 @@ session https://vl.example.com true
 "$H" sync-menu
 check "managed block rewritten in place, user entries kept" \
   "menu_has 'has(\"mine\") and has(\"varlatch.login\")' && [ \$(grep -c '>>> varlatch plugin' \"\$MENU\") -eq 1 ]"
+jq '.servers += [.servers[0] | .server = "https://two.example.com"]' "$T/status.json" > "$T/status2.json"
+mv "$T/status2.json" "$T/status.json"; "$H" sync-menu
+check "several servers: one dashboard row each" \
+  "menu_has '(.[\"varlatch.web0\"].action | endswith(\"web https://vl.example.com\")) and (.[\"varlatch.web1\"].action | endswith(\"web https://two.example.com\")) and (has(\"varlatch.web\") | not)'"
+check "several servers: every row has a glyph" "menu_has '[to_entries[] | select(.key | startswith(\"varlatch\")) | .value.icon] | all(. != \"\")'"
+: > "$T/calls.log"; "$H" web https://two.example.com; sleep 0.2
+check "web opens the given server" "calls | grep -q 'xdg-open https://two.example.com'"
+: > "$T/calls.log"; "$H" web; sleep 0.2
+check "web with no server opens the first one" "calls | grep -q 'xdg-open https://vl.example.com'"
+session https://vl.example.com true
 echo '{"current": "0.15.0"}' > "$U"; "$H" sync-menu
 check "device sign-in row from CLI 0.14.0" "menu_has '.[\"varlatch.device\"].action | endswith(\"login-device https://vl.example.com\")'"
 echo '{"current": "0.13.0"}' > "$U"; "$H" sync-menu

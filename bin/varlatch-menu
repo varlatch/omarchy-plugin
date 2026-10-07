@@ -430,7 +430,8 @@ case "${1:-}" in
     ;;
 
   web)
-    server=$(first_server)
+    # A given server's dashboard, else the first stored one.
+    server="${2:-$(first_server)}"
     [ -n "$server" ] || { notify "No stored server."; exit 1; }
     xdg-open "$server" >/dev/null 2>&1 &
     ;;
@@ -737,7 +738,7 @@ elif not servers:
     root_desc = "Not logged in"
 elif len(servers) == 1:
     s = servers[0]
-    root_desc = f"{host(s['server'])} — {left(s, now)}"
+    root_desc = f"{host(s['server'])}, {left(s, now)}"
 else:
     root_desc = f"{len(live)}/{len(servers)} sessions live"
 
@@ -746,8 +747,8 @@ for i, s in enumerate(servers):
     entries.append((f"varlatch.session{i}", {
         "icon": "",
         "label": host(s["server"]),
-        "description": "Logged in — " + left(s, now) if s.get("expired") is not True
-            else "Session EXPIRED — log in again",
+        "description": "Logged in, " + left(s, now) if s.get("expired") is not True
+            else "Session expired, log in again",
         "action": f"{bin_path} status-notify",
     }))
 if cli_missing:
@@ -777,7 +778,7 @@ elif not servers or expired:
 for i, s in enumerate(live):
     entries.append((f"varlatch.renew{i}", {"icon": "\uf021",
         "label": "Renew session" if len(live) == 1 else f"Renew {host(s['server'])}",
-        "description": f"{host(s['server'])} — {left(s, now)} · browser passkey sign-in",
+        "description": f"{host(s['server'])}, {left(s, now)} · browser passkey sign-in",
         "action": f"{bin_path} login {s['server']}"}))
 if servers:
     if len(servers) == 1:
@@ -794,8 +795,14 @@ if servers:
     entries.append(("varlatch.verify", {"icon": "", "label": "Verify credentials",
         "description": "Probe each stored credential against its server",
         "action": f"{bin_path} verify"}))
-    entries.append(("varlatch.web", {"icon": "", "label": "Open dashboard",
-        "action": f"{bin_path} web"}))
+    # One dashboard row per server: the dashboard is the server itself.
+    if len(servers) == 1:
+        entries.append(("varlatch.web", {"icon": "", "label": "Open dashboard",
+            "action": f"{bin_path} web {servers[0]['server']}"}))
+    else:
+        for i, s in enumerate(servers):
+            entries.append((f"varlatch.web{i}", {"icon": "", "label": f"Open {host(s['server'])}",
+                "description": "Dashboard", "action": f"{bin_path} web {s['server']}"}))
 if ver.get("updateAvailable") and ver.get("install") == "release":
     entries.append(("varlatch.update", {"icon": "", "label": "Update CLI",
         "description": f"{ver.get('current')} → {ver.get('latest')}",
@@ -845,7 +852,7 @@ PY
     ;;
 
   *)
-    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-device [server]|login-cancel|login-check|logout [server]|web|refresh|sync-menu|version-info [--force|--max-age <s>]|notify-update <current> <latest> <install>|upgrade-cli [version]|install-cli>" >&2
+    echo "Usage: varlatch-menu <has-credentials|status-notify|verify|notify-session <server> <state> <message>|login [server]|login-device [server]|login-cancel|login-check|logout [server]|web [server]|refresh|sync-menu|version-info [--force|--max-age <s>]|notify-update <current> <latest> <install>|upgrade-cli [version]|install-cli>" >&2
     exit 1
     ;;
 esac

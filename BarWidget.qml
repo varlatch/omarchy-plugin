@@ -6,7 +6,7 @@ import qs.Commons
 import qs.Ui
 
 // Varlatch session disclosure. Everything shown here
-// comes from `varlatch status --json`, which reads local files only — the
+// comes from `varlatch status --json`, which reads local files only: the
 // widget never makes ambient authenticated calls with a stored credential.
 // The one ambient network read is the opt-in release check (checkUpdates),
 // which is anonymous and cached by the helper.
@@ -183,7 +183,7 @@ BarWidget {
           // ("Renew now" / "Log in") can start the login.
           Quickshell.execDetached([root.menuHelper, "notify-session", s.server, s.state,
             s.state === "expired"
-              ? "Credential for " + shortHost(s.server) + " has expired — log in again."
+              ? "Credential for " + shortHost(s.server) + " has expired; log in again."
               : "Credential for " + shortHost(s.server) + " expires soon (" + remainingText(s.expiresAt, now) + ")."])
         }
       }
@@ -357,8 +357,14 @@ BarWidget {
     function toggle(): void { root.togglePanel() }
     // Open the panel on its server address form.
     function connect(): void { if (panelLoader.item) panelLoader.item.startConnect() }
+    // Open the panel with a server's other actions showing (for checks).
+    function showActions(server: string): void {
+      if (!panelLoader.item) return
+      panelLoader.item.open()
+      panelLoader.item.expandedServer = server
+    }
     function debugState(): string {
-      return JSON.stringify({ sessionState: root.sessionState, servers: root.servers, pendingLogin: root.pendingLogin, cliVersion: root.cliVersion, cliInstall: root.cliInstall, latestVersion: root.latestVersion, updateAvailable: root.updateAvailable, errorDetail: root.errorDetail, opened: root.opened, hasPanel: !!panelLoader.item, connecting: panelLoader.item ? panelLoader.item.connecting : false, connectFocused: panelLoader.item ? panelLoader.item.connectFocused : false })
+      return JSON.stringify({ sessionState: root.sessionState, servers: root.servers, pendingLogin: root.pendingLogin, cliVersion: root.cliVersion, cliInstall: root.cliInstall, latestVersion: root.latestVersion, updateAvailable: root.updateAvailable, errorDetail: root.errorDetail, opened: root.opened, hasPanel: !!panelLoader.item, connecting: panelLoader.item ? panelLoader.item.connecting : false, connectFocused: panelLoader.item ? panelLoader.item.connectFocused : false, expandedServer: panelLoader.item ? panelLoader.item.expandedServer : "" })
     }
   }
 

@@ -42,6 +42,7 @@ Panel {
     } else {
       connecting = false
       connectError = ""
+      expandedServer = ""
     }
   }
 
@@ -82,6 +83,8 @@ Panel {
   // another server. Submitting starts the usual browser sign-in.
   property bool connecting: false
   property string connectError: ""
+  // The server whose row shows its other actions ("⋯"), if any.
+  property string expandedServer: ""
   readonly property bool connectShown: cliUsable && pendingLogin === null
     && (connecting || (servers.length === 0 && knownServer === ""))
   // Something to go back to, so the form gets a cancel.
@@ -224,10 +227,11 @@ Panel {
               visible: root.servers.length > 0
               onClicked: { if (root.hostWidget && !root.hostWidget.verifying) root.hostWidget.verify() }
             }
+            // With several servers, each row opens its own dashboard.
             Chip {
               label: "dashboard"
-              visible: root.servers.length > 0
-              onClicked: { root.act(["web"]); root.close() }
+              visible: root.servers.length === 1
+              onClicked: { root.act(["web", root.servers[0].server]); root.close() }
             }
           }
         }
@@ -363,77 +367,138 @@ Panel {
           }
         }
 
-        // ---- Sessions
+        // ---- Sessions. The host name opens that server's dashboard; "⋯"
+        // shows the row's other actions: dashboard, copy address, and
+        // signing in again from another device.
         Repeater {
           model: root.servers
-          delegate: Item {
+          delegate: Column {
             id: sessionRow
             required property var modelData
             width: mainColumn.width
-            height: Style.space(44)
+            spacing: Style.space(4)
 
             readonly property bool bad: modelData.expired === true || modelData.state === "warning"
+            readonly property bool expanded: root.expandedServer === modelData.server
 
-            Rectangle {
-              width: Style.space(8)
-              height: width
-              radius: width / 2
-              anchors.left: parent.left
-              anchors.verticalCenter: parent.verticalCenter
-              color: modelData.expired === true ? root.urgent
-                : modelData.state === "warning" ? Qt.alpha(root.urgent, 0.75)
-                : "#7bc96f"
-            }
+            Item {
+              width: parent.width
+              height: Style.space(44)
 
-            Column {
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(18)
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(2)
-
-              Text {
-                text: root.shortHost(modelData.server)
-                color: root.fg
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
+              Rectangle {
+                width: Style.space(8)
+                height: width
+                radius: width / 2
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                color: sessionRow.modelData.expired === true ? root.urgent
+                  : sessionRow.modelData.state === "warning" ? Qt.alpha(root.urgent, 0.75)
+                  : "#7bc96f"
               }
-              Text {
-                text: {
-                  var base = modelData.expired === true
-                    ? "Session expired — log in again"
-                    : "Logged in — " + root.remaining(modelData)
-                  var p = modelData.probe
-                  if (p) base += p.state === "valid" ? " · ✓ verified"
-                    : p.state === "invalid" ? " · ✕ " + (p.detail || "invalid")
-                    : " · server unreachable"
-                  return base
+
+              Column {
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(18)
+                anchors.right: rowChips.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(2)
+
+                Text {
+                  width: parent.width
+                  elide: Text.ElideRight
+                  text: root.shortHost(sessionRow.modelData.server)
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.underline: hostMouse.containsMouse
+                  MouseArea {
+                    id: hostMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: { root.act(["web", sessionRow.modelData.server]); root.close() }
+                  }
                 }
-                color: sessionRow.bad || (modelData.probe && modelData.probe.state !== "valid")
-                  ? root.urgent : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                Text {
+                  width: parent.width
+                  elide: Text.ElideRight
+                  text: {
+                    var m = sessionRow.modelData
+                    var base = m.expired === true
+                      ? "Session expired, log in again"
+                      : "Logged in, " + root.remaining(m)
+                    var p = m.probe
+                    if (p) base += p.state === "valid" ? " · ✓ verified"
+                      : p.state === "invalid" ? " · ✕ " + (p.detail || "invalid")
+                      : " · server unreachable"
+                    return base
+                  }
+                  color: sessionRow.bad || (sessionRow.modelData.probe && sessionRow.modelData.probe.state !== "valid")
+                    ? root.urgent : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Row {
+                id: rowChips
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(6)
+                // Renew = log in again to the same server; the CLI revokes the
+                // old credential only once the new one is saved, so a cancelled
+                // sign-in loses nothing.
+                Chip {
+                  label: "renew"
+                  visible: sessionRow.modelData.expired !== true && root.pendingLogin === null
+                  onClicked: root.act(["login", sessionRow.modelData.server])
+                }
+                Chip {
+                  label: sessionRow.modelData.expired === true ? "log in" : "log out"
+                  danger: sessionRow.modelData.expired !== true
+                  visible: sessionRow.modelData.expired !== true || root.pendingLogin === null
+                  onClicked: {
+                    if (sessionRow.modelData.expired === true) root.act(["login", sessionRow.modelData.server])
+                    else { root.act(["logout", sessionRow.modelData.server]); root.close() }
+                  }
+                }
+                Chip {
+                  label: "⋯"
+                  onClicked: root.expandedServer = sessionRow.expanded ? "" : sessionRow.modelData.server
+                }
               }
             }
 
-            Row {
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(6)
-              // Renew = log in again to the same server; the CLI revokes the
-              // old credential only once the new one is saved, so a cancelled
-              // sign-in loses nothing.
-              Chip {
-                label: "renew"
-                visible: modelData.expired !== true && root.pendingLogin === null
-                onClicked: root.act(["login", modelData.server])
-              }
-              Chip {
-                label: modelData.expired === true ? "log in" : "log out"
-                danger: modelData.expired !== true
-                visible: modelData.expired !== true || root.pendingLogin === null
-                onClicked: {
-                  if (modelData.expired === true) root.act(["login", modelData.server])
-                  else { root.act(["logout", modelData.server]); root.close() }
+            Item {
+              visible: sessionRow.expanded
+              width: parent.width
+              height: moreChips.implicitHeight
+
+              Row {
+                id: moreChips
+                anchors.right: parent.right
+                spacing: Style.space(6)
+                Chip {
+                  label: "dashboard"
+                  onClicked: { root.act(["web", sessionRow.modelData.server]); root.close() }
+                }
+                Chip {
+                  id: copyChip
+                  property bool copied: false
+                  label: copied ? "copied" : "copy address"
+                  onClicked: {
+                    Quickshell.execDetached(["wl-copy", sessionRow.modelData.server])
+                    copied = true
+                    copiedTimer.restart()
+                  }
+                  Timer { id: copiedTimer; interval: 1500; onTriggered: copyChip.copied = false }
+                }
+                // Renew (or log in again) from a phone or another computer.
+                Chip {
+                  label: "other device"
+                  visible: root.pendingLogin === null && !!root.hostWidget && root.hostWidget.deviceSignIn
+                  onClicked: root.act(["login-device", sessionRow.modelData.server])
                 }
               }
             }
@@ -497,6 +562,12 @@ Panel {
               label: "log in"
               visible: root.sessionState === "none" && root.knownServer !== "" && !root.connecting
               onClicked: root.act(["login", root.knownServer])
+            }
+            Chip {
+              label: "other device"
+              visible: root.sessionState === "none" && root.knownServer !== "" && !root.connecting
+                && !!root.hostWidget && root.hostWidget.deviceSignIn
+              onClicked: root.act(["login-device", root.knownServer])
             }
             Chip {
               label: "other server"
