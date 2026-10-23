@@ -2,11 +2,20 @@
 # A stand-in for the varlatch CLI, for tests/run.sh. Every call is recorded
 # in $HOME/calls.log. `status` prints $HOME/status.json (no sessions when it
 # is missing), and the FAKE_* variables choose how sign-ins end.
+# FAKE_STDERR is a line every call writes to stderr first, as the CLI warns
+# on a Node.js release without its security fixes; FAKE_STATUS_FAIL makes
+# `status` fail as an unreachable server does.
 echo "cli $*" >> "$HOME/calls.log"
+[ -n "${FAKE_STDERR:-}" ] && echo "$FAKE_STDERR" >&2
 case "${1:-}" in
   --version) echo "varlatch ${FAKE_VERSION:-0.15.0} (migration 26)"; exit 0 ;;
   --help) echo "Usage: varlatch <command>"; exit 0 ;;
-  status) cat "$HOME/status.json" 2>/dev/null || echo '{"version":1,"servers":[],"repo":null}'; exit 0 ;;
+  status)
+    if [ -n "${FAKE_STATUS_FAIL:-}" ]; then
+      echo "varlatch status: cannot reach https://vl.example.com" >&2
+      exit 69
+    fi
+    cat "$HOME/status.json" 2>/dev/null || echo '{"version":1,"servers":[],"repo":null}'; exit 0 ;;
   logout) echo "Logged out."; exit 0 ;;
   login) ;;
   *) exit 64 ;;

@@ -86,7 +86,7 @@ EOF
   MENU="$T/.config/omarchy/extensions/omarchy-menu.jsonc"
   widget '{}'
   unset FAKE_VERSION FAKE_WAIT FAKE_CHOICE FAKE_LOGIN_RC FAKE_LOGIN_SLEEP FAKE_START_FAIL \
-    FAKE_LATEST FAKE_CURL_FAIL FAKE_SERVER_VERSION VARLATCH_SERVER
+    FAKE_LATEST FAKE_CURL_FAIL FAKE_SERVER_VERSION FAKE_STDERR FAKE_STATUS_FAIL VARLATCH_SERVER
 }
 
 # The widget's entry in shell.json: the fake CLI plus the given settings.
@@ -207,6 +207,23 @@ echo '{"current": "0.13.0"}' > "$U"; "$H" sync-menu
 check "no device sign-in row before 0.14.0" "menu_has 'has(\"varlatch.device\") | not'"
 echo '{"current": "0.14.0", "latest": "0.15.0", "updateAvailable": true, "install": "release"}' > "$U"; "$H" sync-menu
 check "Update CLI row for a release install" "menu_has '.[\"varlatch.update\"].description == \"0.14.0 → 0.15.0\"'"
+
+# --------------------------------------------------------------------------
+section "verify (status --probe)"
+new_home
+jq -n '{version: 1, repo: null, servers: [{server: "https://vl.example.com", name: null,
+  issuedAt: "2026-10-07T06:00:00Z", expiresAt: "2099-01-01T00:00:00Z", expired: false, expiring: false,
+  probe: {state: "valid"}}]}' > "$T/status.json"
+"$H" verify
+check "each server's probe state in the notification" \
+  "calls | grep -F 'notify-send -a Varlatch Varlatch https://vl.example.com: valid'" "$(calls)"
+NODE_WARNING="varlatch: Node.js 26.12.0 is missing security fixes; update it to 26.12.1 or later. VARLATCH_NODE_CHECK=off hides this warning."
+: > "$T/calls.log"; FAKE_STDERR="$NODE_WARNING" "$H" verify
+check "a CLI warning on stderr leaves the document readable" \
+  "calls | grep -F 'notify-send -a Varlatch Varlatch https://vl.example.com: valid'" "$(calls)"
+: > "$T/calls.log"; FAKE_STDERR="$NODE_WARNING" FAKE_STATUS_FAIL=1 "$H" verify && rc=0 || rc=$?
+check "a failure notifies what the CLI said on stderr" \
+  "[ $rc -eq 1 ] && calls | grep -F 'notify-send -a Varlatch Varlatch verify failed:' && calls | grep -qF 'cannot reach https://vl.example.com'" "$(calls)"
 
 # --------------------------------------------------------------------------
 section "sign-in state (login, login-check, login-cancel)"
