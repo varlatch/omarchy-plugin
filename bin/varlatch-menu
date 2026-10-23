@@ -240,9 +240,17 @@ case "${1:-}" in
 
   verify)
     # The one explicitly network-touching read: --probe checks each stored
-    # credential against its server.
-    out=$(eval "$CMD status --probe --json" 2>&1) \
-      || { notify "verify failed: $out"; exit 1; }
+    # credential against its server. Only stdout is the document: the CLI
+    # can warn on stderr, as on a Node.js release without its security fixes.
+    err=$(mktemp)
+    # Removed however the action ends. bash skips the EXIT trap when a
+    # signal kills it, so those become exits.
+    trap 'rm -f "$err"' EXIT
+    trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+    if ! out=$(eval "$CMD status --probe --json" 2>"$err"); then
+      msg=$(cat "$err")
+      notify "verify failed: ${msg:-$out}"; exit 1
+    fi
     summary=$(echo "$out" | jq -r '.servers[] | "\(.server): \(.probe.state // "unknown")\(if .probe.detail then " (\(.probe.detail))" else "" end)"')
     notify "${summary:-no stored credentials}"
     refresh_widget
