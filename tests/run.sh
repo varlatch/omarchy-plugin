@@ -86,7 +86,7 @@ EOF
   MENU="$T/.config/omarchy/extensions/omarchy-menu.jsonc"
   widget '{}'
   unset FAKE_VERSION FAKE_WAIT FAKE_CHOICE FAKE_LOGIN_RC FAKE_LOGIN_SLEEP FAKE_START_FAIL \
-    FAKE_LATEST FAKE_CURL_FAIL FAKE_SERVER_VERSION FAKE_STDERR FAKE_STATUS_FAIL VARLATCH_SERVER
+    FAKE_LATEST FAKE_CURL_FAIL FAKE_SERVER_VERSION FAKE_STDERR FAKE_STATUS_FAIL FAKE_STATUS_SLEEP VARLATCH_SERVER
 }
 
 # The widget's entry in shell.json: the fake CLI plus the given settings.
@@ -224,6 +224,13 @@ check "a CLI warning on stderr leaves the document readable" \
 : > "$T/calls.log"; FAKE_STDERR="$NODE_WARNING" FAKE_STATUS_FAIL=1 "$H" verify && rc=0 || rc=$?
 check "a failure notifies what the CLI said on stderr" \
   "[ $rc -eq 1 ] && calls | grep -F 'notify-send -a Varlatch Varlatch verify failed:' && calls | grep -qF 'cannot reach https://vl.example.com'" "$(calls)"
+# Its stderr file goes, whether verify succeeds, fails, or is stopped.
+mkdir "$T/tmp"
+TMPDIR="$T/tmp" "$H" verify
+TMPDIR="$T/tmp" FAKE_STATUS_FAIL=1 "$H" verify || true
+TMPDIR="$T/tmp" FAKE_STATUS_SLEEP=2 "$H" verify & helper=$!
+sleep 0.5; kill -TERM "$helper"; wait "$helper" && rc=0 || rc=$?
+check "no temporary file is left, even after SIGTERM" "[ $rc -eq 143 ] && [ -z \"\$(ls -A '$T/tmp')\" ]" "rc=$rc; $(ls -A "$T/tmp")"
 
 # --------------------------------------------------------------------------
 section "sign-in state (login, login-check, login-cancel)"
