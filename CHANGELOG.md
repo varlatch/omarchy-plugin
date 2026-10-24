@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 (2026-10-24)
+
+- **Fix: Verify did nothing** when the Varlatch CLI printed a warning, as
+  the CLI does from 0.19.0 when Node.js lacks its security fixes. Verify now
+  reads only the CLI's output as the status, and on a failure the
+  notification shows what the CLI said. Update before moving to Varlatch
+  0.19.0.
+
 ## 0.5.0 (2026-10-07)
 
 - **Restart after an update:** the shell keeps running the widget code it
