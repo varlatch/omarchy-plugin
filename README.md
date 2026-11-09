@@ -90,9 +90,10 @@ with arguments, gets the release notes instead, since you update those
 yourself.
 
 Signing in needs no terminal window. The CLI opens your browser for the
-passkey prompt, and while it waits the panel shows "Signing in to …" with
-**open link**, for when the page opens in the wrong browser, **other
-device**, and **cancel**. The result arrives as a notification.
+passkey prompt and the panel closes, so it never covers the browser. While
+the CLI waits, reopening the panel shows "Signing in to …" with **open
+link**, for when the page opens in the wrong browser, **other device**, and
+**cancel**. The result arrives as a notification.
 
 ## Sign in from another device
 
