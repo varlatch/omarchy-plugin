@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.2 (2026-11-09)
+
+- **Fix: the bar and the Omarchy menu stopped responding** after a browser
+  sign-in from the panel, until the shell was restarted (or the laptop
+  forced off). The panel is a full-screen overlay that holds keyboard focus,
+  and it stayed open over the browser for the whole sign-in. **log in**,
+  **renew** and **connect** now close it; reopen it to see the sign-in under
+  way. Signing in from another device keeps it open for the code.
+- **The menu file is rewritten far less often.** The menu showed time left
+  to the minute, so a live session rewrote `omarchy-menu.jsonc` and reloaded
+  the menu every minute. It now counts whole hours ("Logged in, 3h left");
+  the panel keeps the minutes.
+- **No half-written files.** The menu file and the plugin's state files are
+  written to a temporary file and renamed into place, so the shell never
+  reads one mid-write, and menu updates run one at a time instead of
+  interleaving. A symlinked `omarchy-menu.jsonc` stays a symlink.
+
 ## 0.5.1 (2026-10-24)
 
 - **Fix: Verify did nothing** when the Varlatch CLI printed a warning, as

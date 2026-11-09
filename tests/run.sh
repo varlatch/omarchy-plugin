@@ -207,6 +207,20 @@ echo '{"current": "0.13.0"}' > "$U"; "$H" sync-menu
 check "no device sign-in row before 0.14.0" "menu_has 'has(\"varlatch.device\") | not'"
 echo '{"current": "0.14.0", "latest": "0.15.0", "updateAvailable": true, "install": "release"}' > "$U"; "$H" sync-menu
 check "Update CLI row for a release install" "menu_has '.[\"varlatch.update\"].description == \"0.14.0 → 0.15.0\"'"
+jq -n --arg e "$(date -u -d '+90 minutes' +%Y-%m-%dT%H:%M:%SZ)" '{version: 1, repo: null, servers: [{server: "https://vl.example.com",
+  name: null, issuedAt: "2026-10-07T06:00:00Z", expiresAt: $e, expired: false, expiring: false}]}' > "$T/status.json"
+"$H" sync-menu
+check "menu counts down in whole hours" "menu_has '.[\"varlatch.session0\"].description == \"Logged in, 1h left\"'" "$(cat "$MENU")"
+touch -d '2000-01-01' "$S/servers.json"; "$H" sync-menu
+check "same servers leave servers.json alone" "[ \"\$(stat -c %Y '$S/servers.json')\" = \"\$(date -d 2000-01-01 +%s)\" ]"
+printf '{\n  "mine": {"label": "x"},\n}\n' > "$MENU"
+for _ in 1 2 3 4 5 6; do "$H" sync-menu & done; wait
+check "overlapping runs leave one valid block" \
+  "menu_has 'has(\"mine\") and has(\"varlatch.session0\")' && [ \$(grep -c '>>> varlatch plugin' \"\$MENU\") -eq 1 ]" "$(cat "$MENU")"
+check "no temporary menu file is left" "[ -z \"\$(find '$T/.config/omarchy/extensions' -name '.omarchy-menu.jsonc.*')\" ]"
+mkdir -p "$T/dotfiles"; mv "$MENU" "$T/dotfiles/omarchy-menu.jsonc"; ln -s "$T/dotfiles/omarchy-menu.jsonc" "$MENU"
+session https://vl.example.com true; "$H" sync-menu
+check "a symlinked menu file stays a symlink" "[ -L '$MENU' ] && menu_has 'has(\"mine\") and has(\"varlatch.login\")'"
 
 # --------------------------------------------------------------------------
 section "verify (status --probe)"

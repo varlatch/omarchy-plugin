@@ -49,7 +49,17 @@ login_running() {
   [ -n "$pid" ] && { [ -z "$boot" ] || [ "$boot" = "$(boot_id)" ]; } && kill -0 "$pid" 2>/dev/null
 }
 
-login_idle() { mkdir -p "$STATE_DIR"; echo '{"state":"idle"}' > "$LOGIN_FILE"; }
+# Replace a state file with stdin in one rename: the widget reloads these
+# files the moment they change and must never read one half-written.
+write_state() {
+  local tmp
+  tmp=$(mktemp "$1.XXXXXX") || return 1
+  # Nothing on stdin means the writer failed: keep the old file.
+  if cat > "$tmp" && [ -s "$tmp" ] && mv -f "$tmp" "$1"; then return 0; fi
+  rm -f "$tmp"; return 1
+}
+
+login_idle() { mkdir -p "$STATE_DIR"; echo '{"state":"idle"}' | write_state "$LOGIN_FILE"; }
 
 # "https://varlatch.example.com" from what a person typed: trimmed,
 # https:// when no scheme is given, no trailing slash.
@@ -67,7 +77,7 @@ remember_server() {
   mkdir -p "$STATE_DIR"
   local known="[]"
   [ -f "$STATE_FILE" ] && known=$(jq -c 'if type == "array" then . else [] end' "$STATE_FILE" 2>/dev/null || echo "[]")
-  jq -cn --arg s "$1" --argjson known "$known" '[$s] + ($known - [$s])' > "$STATE_FILE"
+  jq -cn --arg s "$1" --argjson known "$known" '[$s] + ($known - [$s])' | write_state "$STATE_FILE"
 }
 
 status_json() { eval "$CMD status --json" 2>/dev/null; }
@@ -282,7 +292,7 @@ case "${1:-}" in
     cli=$!
     write_login() {
       jq -n --arg s "$server" --arg u "$1" --argjson p "$cli" --arg b "$(boot_id)" \
-        '{state: "pending", server: $s, url: $u, pid: $p, boot: $b}' > "$LOGIN_FILE"
+        '{state: "pending", server: $s, url: $u, pid: $p, boot: $b}' | write_state "$LOGIN_FILE"
     }
     write_login ""
     url=""
@@ -365,7 +375,7 @@ case "${1:-}" in
     jq -n --arg s "$server" --arg u "$uri" --arg c "$code" --arg e "$expires" \
       --arg q "$([ -f "$qr" ] && echo "$qr")" --argjson p "$waiter" --arg b "$(boot_id)" \
       '{state: "pending", mode: "device", server: $s, url: $u, code: $c, expiresAt: $e,
-        qr: $q, pid: $p, boot: $b}' > "$LOGIN_FILE"
+        qr: $q, pid: $p, boot: $b}' | write_state "$LOGIN_FILE"
     rc=0; wait "$waiter" || rc=$?
     state=$(tail -n 1 "$out" | jq -r '.state // empty' 2>/dev/null || true)
     if [ "$rc" -eq 0 ]; then
@@ -710,9 +720,38 @@ case "${1:-}" in
     # current session state, so the submenu shows what you are logged in to
     # and offers only the actions that make sense. The menu hot-reloads the
     # file; we only rewrite (and refresh) when the content actually changed.
+    # The widget runs this after every status poll, so runs can overlap: one
+    # at a time, or two would interleave their writes to the menu file.
+    mkdir -p "$STATE_DIR"
+    exec 9>"$STATE_DIR/sync-menu.lock"
+    flock -w 30 9 || exit 0
     VARLATCH_RESTART_VERSION="$restart_version" VARLATCH_MENU_CMD="$CMD" VARLATCH_SHOW_LOCALHOST="$(show_localhost && echo on || echo off)" python3 - <<'PY'
-import json, os, re, subprocess, sys
+import json, os, re, subprocess, sys, tempfile
 from datetime import datetime, timezone
+
+def write_atomic(path, text):
+    # The shell watches these files and reads them the moment they change,
+    # so never let it see one half-written: write a sibling and rename it
+    # over. Through a symlink (dotfiles), replace the file it points to.
+    path = os.path.realpath(path)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o644
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix="." + os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
 
 home = os.path.expanduser("~")
 menu_path = os.path.join(home, ".config/omarchy/extensions/omarchy-menu.jsonc")
@@ -735,11 +774,16 @@ def not_local(u): return not re.match(r"^[a-z]+://(localhost|127\.)", str(u))
 if os.environ.get("VARLATCH_SHOW_LOCALHOST") != "on":
     servers = [s for s in servers if not_local(s["server"])]
 
-# Remember servers across logouts so "Log in" keeps a target.
+# Remember servers across logouts so "Log in" keeps a target. The widget
+# reloads the file on every change, so leave it alone when nothing changed.
 if servers:
-    os.makedirs(os.path.dirname(state_file), exist_ok=True)
-    with open(state_file, "w", encoding="utf-8") as f:
-        json.dump([s["server"] for s in servers], f)
+    known = json.dumps([s["server"] for s in servers])
+    try:
+        previous = open(state_file, encoding="utf-8").read()
+    except OSError:
+        previous = None
+    if previous != known:
+        write_atomic(state_file, known)
 remembered = []
 try:
     remembered = json.load(open(state_file, encoding="utf-8"))
@@ -760,11 +804,14 @@ def left(s, now):
         dt = datetime.fromisoformat(exp.replace("Z", "+00:00"))
     except ValueError:
         return "no expiry recorded"
-    ms = (dt - now).total_seconds()
-    if ms <= 0:
+    seconds = (dt - now).total_seconds()
+    if seconds <= 0:
         return "EXPIRED"
-    h, m = int(ms // 3600), int(ms % 3600 // 60)
-    return (f"{h}h {m}m left" if h else f"{m}m left")
+    # Whole hours only: every change to this text rewrites the menu file and
+    # reloads the menu, and minutes would do that once a minute. The panel
+    # keeps the minute countdown.
+    h = int(seconds // 3600)
+    return f"{h}h left" if h else "under an hour left"
 
 # CLI version and update, from the widget's last version-info.
 try:
@@ -903,8 +950,7 @@ else:
         sys.exit(f"varlatch-menu: {menu_path} is not a JSONC object; menu entries not added.")
 if new == raw:
     sys.exit(0)
-os.makedirs(os.path.dirname(menu_path), exist_ok=True)
-open(menu_path, "w", encoding="utf-8").write(new)
+write_atomic(menu_path, new)
 subprocess.run(["omarchy", "menu", "refresh"], capture_output=True)
 PY
     ;;

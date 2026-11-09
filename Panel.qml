@@ -75,6 +75,17 @@ Panel {
     Quickshell.execDetached([root.menuHelper].concat(args))
   }
 
+  // Browser sign-in closes the panel. The panel is a full-screen overlay
+  // that holds keyboard focus, and left open it sits over the browser
+  // window for the whole passkey sign-in, which is when the bar and the
+  // Omarchy menu have been seen to stop responding. Reopening the panel shows the sign-in
+  // under way. Device sign-in keeps the panel open: it shows the code and
+  // the QR code, and no browser opens here.
+  function startBrowserLogin(server) {
+    act(["login", server])
+    root.close()
+  }
+
   readonly property var expiredServers: servers.filter(function (s) { return s.expired === true })
   readonly property bool loginUseful: servers.length === 0 || expiredServers.length > 0
 
@@ -125,8 +136,8 @@ Panel {
       connectError = "Give the server's address, such as varlatch.example.com"
       return
     }
-    act(["login", url])
     stopConnect()
+    startBrowserLogin(url)
   }
 
   component Chip: Rectangle {
@@ -455,7 +466,7 @@ Panel {
                 Chip {
                   label: sessionRow.modelData.expired === true ? "log in" : "renew"
                   visible: root.pendingLogin === null
-                  onClicked: root.act(["login", sessionRow.modelData.server])
+                  onClicked: root.startBrowserLogin(sessionRow.modelData.server)
                 }
                 Chip {
                   label: "⋯"
@@ -560,7 +571,7 @@ Panel {
             Chip {
               label: "log in"
               visible: root.sessionState === "none" && root.knownServer !== "" && !root.connecting
-              onClicked: root.act(["login", root.knownServer])
+              onClicked: root.startBrowserLogin(root.knownServer)
             }
             Chip {
               label: "other device"
