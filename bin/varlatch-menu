@@ -377,7 +377,10 @@ case "${1:-}" in
       '{state: "pending", mode: "device", server: $s, url: $u, code: $c, expiresAt: $e,
         qr: $q, pid: $p, boot: $b}' | write_state "$LOGIN_FILE"
     rc=0; wait "$waiter" || rc=$?
-    state=$(tail -n 1 "$out" | jq -r '.state // empty' 2>/dev/null || true)
+    # The CLI prints each --wait answer as indented JSON, and device-wait
+    # asks again while the code is pending, so $out holds one or more whole
+    # documents: the last one is the answer.
+    state=$(jq -rs 'last | .state // empty' "$out" 2>/dev/null || true)
     if [ "$rc" -eq 0 ]; then
       warn=$(grep '^varlatch:' "$err" || true)
       notify "Logged in to $host.${warn:+ $warn}"

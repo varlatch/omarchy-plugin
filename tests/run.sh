@@ -309,6 +309,11 @@ FAKE_WAIT=deny "$H" login-device https://vl.example.com
 check "denied" "calls | grep -q 'Sign-in to vl.example.com was denied.'"
 FAKE_WAIT=expire "$H" login-device https://vl.example.com
 check "the code expired" "calls | grep -q 'expired before it was approved'"
+# Each --wait answer is indented JSON, and a pending code is asked again,
+# so the answer is the last of several whole documents.
+rm -f "$T/wait-count"; : > "$T/calls.log"
+FAKE_WAIT=pending-then-deny "$H" login-device https://vl.example.com
+check "denied after a pending answer" "calls | grep -q 'Sign-in to vl.example.com was denied.'"
 FAKE_START_FAIL=1 "$H" login-device https://vl.example.com
 check "a refused start shows the CLI's reason" "calls | grep -q 'failed: varlatch login: the server refused to start a sign-in'"
 : > "$T/calls.log"
