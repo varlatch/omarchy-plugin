@@ -34,10 +34,11 @@ case "$mode" in
       echo "varlatch login: the server refused to start a sign-in (NOT_FOUND)" >&2
       exit 1
     fi
-    echo '{"verificationUri":"https://vl.example.com/device","userCode":"BCDF-GHJK","expiresAt":"2099-01-01T00:10:00.000Z"}'
+    # As the CLI prints it: JSON indented by two spaces.
+    printf '{\n  "version": 1,\n  "verificationUri": "https://vl.example.com/device",\n  "userCode": "BCDF-GHJK",\n  "expiresAt": "2099-01-01T00:10:00.000Z"\n}\n'
     ;;
   wait)
-    # FAKE_WAIT: approve | pending-once | deny | expire | hang
+    # FAKE_WAIT: approve | pending-once | deny | expire | pending-then-deny | hang
     n=$(cat "$HOME/wait-count" 2>/dev/null || echo 0)
     n=$((n + 1)); echo "$n" > "$HOME/wait-count"
     case "${FAKE_WAIT:-approve}" in
@@ -45,15 +46,22 @@ case "$mode" in
       pending-once)
         if [ "$n" -eq 1 ]; then
           sleep 1
-          echo '{"state":"pending"}'
+          printf '{\n  "version": 1,\n  "state": "pending"\n}\n'
           echo "varlatch login: not approved yet." >&2
           exit 75
         fi ;;
-      deny) echo '{"state":"denied"}'; echo "varlatch login: the sign-in was denied." >&2; exit 77 ;;
-      expire) echo '{"state":"expired"}'; echo "varlatch login: the sign-in expired." >&2; exit 77 ;;
+      pending-then-deny)
+        if [ "$n" -eq 1 ]; then
+          printf '{\n  "version": 1,\n  "state": "pending"\n}\n'
+          echo "varlatch login: not approved yet." >&2
+          exit 75
+        fi
+        printf '{\n  "version": 1,\n  "state": "denied"\n}\n'; echo "varlatch login: the sign-in was denied." >&2; exit 77 ;;
+      deny) printf '{\n  "version": 1,\n  "state": "denied"\n}\n'; echo "varlatch login: the sign-in was denied." >&2; exit 77 ;;
+      expire) printf '{\n  "version": 1,\n  "state": "expired"\n}\n'; echo "varlatch login: the sign-in expired." >&2; exit 77 ;;
       hang) sleep 60; exit 75 ;;
     esac
-    echo '{"state":"signed-in","credentialId":"crd_test","expiresAt":"2099-01-01T12:00:00Z"}'
+    printf '{\n  "version": 1,\n  "state": "signed-in",\n  "credentialId": "crd_test",\n  "expiresAt": "2099-01-01T12:00:00Z"\n}\n'
     ;;
   browser)
     echo "Open this address to sign in: https://vl.example.com/enroll?state=test"
