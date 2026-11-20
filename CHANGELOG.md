@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.5.2 (2026-11-09)
+## 0.5.3 (2026-11-20)
+
+- **Fix: a denied or expired sign-in from another device** showed as a
+  generic "Sign-in failed" with the CLI's error lines. The CLI prints its
+  answer as JSON over several lines, and the plugin read only the last one.
+  It now reads the whole answer, so the notification says the sign-in was
+  denied, or that its code expired before it was approved.
+
+## 0.5.2 (2026-11-09, not released separately)
 
 - **Fix: the bar and the Omarchy menu stopped responding** after a browser
   sign-in from the panel, until the shell was restarted (or the laptop
