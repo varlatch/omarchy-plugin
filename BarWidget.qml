@@ -52,8 +52,8 @@ BarWidget {
   onSettingsChanged: { refresh(); refreshVersion(); injectPanel() }
 
   // ---- CLI version and updates, from `varlatch-menu version-info`: the
-  // installed version, how it is installed ("release" builds can be
-  // replaced by the plugin; "checkout" and "custom" cannot), and with
+  // installed version, how it is installed (a "release" CLI can be replaced
+  // by the plugin; "homebrew", "checkout" and "custom" cannot), and with
   // checkUpdates on, the latest release (the helper caches the check).
   property string cliVersion: ""
   property string cliInstall: ""
@@ -91,7 +91,7 @@ BarWidget {
     return parts[0] > 0 || parts[1] > 14 || (parts[1] === 14 && parts[2] >= 0)
   }
 
-  // First run: no CLI on PATH. The helper installs the release build in a
+  // First run: no CLI on PATH. The helper installs a release's CLI in a
   // terminal, after the same checks as an update.
   readonly property bool cliMissing: sessionState === "unavailable" && cliInstall === "missing"
   function installCli() {

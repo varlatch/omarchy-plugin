@@ -51,10 +51,11 @@ sign-out, "Log in" still targets the last server you used, remembered in
 Without the `varlatch` CLI, the panel offers **install CLI**. It opens a
 terminal that asks for your server's address, so it can install the CLI
 version that server runs (press Enter for the latest release). It then
-downloads the release CLI and checks it the same way an update does (see
-below), installs it as `~/.local/bin/varlatch` once you confirm, and offers
-the first sign-in. When `~/.local/bin` is not on your `PATH`, it points the
-widget at the file instead. The release CLI needs Node.js 22 or newer; on
+downloads that release's CLI and checks it (see below), installs it as
+`~/.local/bin/varlatch` once you confirm, and offers the first sign-in. When
+`~/.local/bin` is not on your `PATH`, it points the widget at the file
+instead. From Varlatch 0.50 on, the CLI is one native program and needs
+nothing else. The CLI of an earlier release needs Node.js 22 or newer; on
 Omarchy, `omarchy install dev-env node` installs it.
 
 With the CLI but no server known yet, the panel asks for the server's
@@ -78,16 +79,26 @@ shows when a newer release is out, with **notes** and, when the plugin can
 replace your CLI, **update**. A new release also triggers one notification,
 and an **Update CLI** row appears in the menu.
 
-**update** opens a terminal and runs `varlatch self-update` (Varlatch
-0.11.0 and newer), using `sudo` when the CLI's directory is not writable.
-For an older CLI, the plugin does the same steps itself. Either way, it
-downloads `varlatch-cli-<version>.cjs` and `SHA256SUMS` from the release,
-checks the signature on `SHA256SUMS` when the release carries one and
-`cosign` is installed, checks the file against it, shows what it verified,
-and replaces the CLI only after you confirm. This works only for the
-release build. A CLI built from a source checkout, or a `varlatchCommand`
-with arguments, gets the release notes instead, since you update those
-yourself.
+**update** opens a terminal and runs `varlatch self-update`, using `sudo`
+when the CLI's directory is not writable. It shows what it verified, and
+replaces the CLI only after you confirm. Two CLIs cannot update themselves,
+so the plugin does it, the same way: one before 0.11.0, and the Node.js CLI
+(0.23 and earlier) to a release with native programs (0.50 and later). That
+replaces the old CLI in its place, puts it back when the new one does not
+run there, and keeps your sign-ins and settings. On the host of a Compose
+installation the old CLI stays beside the new one as `varlatch-ts`, because
+that installation's host commands need it.
+
+An install or update takes the file that the release's `SHA256SUMS` lists
+for this machine, and always checks it against that list. The native program
+also checks that Varlatch's release workflow signed `SHA256SUMS`, and nothing
+is installed when that fails. For an earlier release, the signature is
+checked when the release carries one and `cosign` is installed.
+
+This works only for a release's CLI. One installed with Homebrew
+(`brew upgrade varlatch`), one built from a source checkout, or a
+`varlatchCommand` with arguments gets the release notes instead, since you
+update those yourself.
 
 Signing in needs no terminal window. The CLI opens your browser for the
 passkey prompt and the panel closes, so it never covers the browser. While
@@ -130,8 +141,7 @@ Set these with `omarchy bar set varlatch <key> <value>` (add `--json` for
 - `refreshIntervalSec`: how often to poll, in seconds (default 30, minimum
   15).
 - `varlatchCommand`: the CLI to run (default `varlatch` on your `PATH`). For
-  a development build, use for example
-  `node /path/to/varlatch/apps/cli/dist/main.js`.
+  a development build, give its command, with arguments if it needs them.
 - `sessionHours`: how long a new sign-in lasts, from 1 to 24 hours (default
   0: the server's default, 12 hours). Applies to every sign-in the widget
   starts, renewals included.
@@ -176,8 +186,8 @@ the widget works out the *expiring* state itself.
 `tests/run.sh` tests the manifest and `bin/varlatch-menu` offline, each test
 in a throwaway `HOME` with stand-ins for the CLI (`tests/fake-varlatch`),
 `curl`, `notify-send`, and the omarchy commands. It needs `jq`, `python3`,
-and Node.js 22 or newer, and checks the QR code when `qrencode` is
-installed. CI runs it with `shellcheck` on every pull request. The QML is
+Node.js 22 or newer and a C compiler (for stand-ins of the CLI before and
+from 0.50), and checks the QR code when `qrencode` is installed. CI runs it with `shellcheck` on every pull request. The QML is
 checked by hand on a live bar: `omarchy restart shell` after editing it,
 and `omarchy-shell varlatch debugState` for the widget's state.
 

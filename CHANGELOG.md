@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+Ready for Varlatch 0.50.0, whose CLI is a native program instead of a file
+that Node.js runs. Works with both, and with servers of both.
+
+- **install CLI** takes the native program of a release that has one, and
+  the Node.js file of one that has not, by what the release's `SHA256SUMS`
+  lists. Node.js is asked for only with the latter. A server on a prerelease
+  gets that prerelease.
+- **update** from the Node.js CLI to a release with native programs replaces
+  the CLI in place: its own self-update cannot. The old CLI comes back when
+  the new one does not run, sign-ins are kept, and on a Compose host it stays
+  as `varlatch-ts`.
+- A native CLI is recognized and offered **update** (its own self-update). A
+  Homebrew copy is named as such, and its update is `brew upgrade varlatch`.
+- A prerelease CLI (`0.50.0-rc.3`) is offered its release; before, it
+  counted as newer.
+
 ## 0.5.3 (2026-11-20)
 
 - **Fix: a denied or expired sign-in from another device** showed as a

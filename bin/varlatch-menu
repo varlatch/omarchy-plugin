@@ -108,24 +108,39 @@ refresh_widget() { omarchy-shell varlatch refresh >/dev/null 2>&1 || true; }
 
 notify() { notify-send -a Varlatch "Varlatch" "$1"; }
 
-# "0.10.1" from `varlatch 0.10.1 (migration 20)`; empty when the CLI is
-# missing or predates --version.
-cli_version() { eval "$CMD --version" 2>/dev/null | sed -nE '1s/^varlatch ([0-9][^ ]*).*/\1/p' || true; }
+# "0.10.1" from `varlatch 0.10.1 (migration 20)`, "0.50.0" from
+# `varlatch 0.50.0`; empty when the CLI is missing or predates --version.
+cli_version() { eval "$CMD --version" 2>/dev/null | parse_version || true; }
+parse_version() { sed -nE '1s/^varlatch ([0-9][^ ]*).*/\1/p'; }
+
+# A file is the TypeScript CLI's single-file build (varlatch-cli-X.cjs, up to
+# 0.23): its banner is in its first lines. From 0.50 the CLI is a native
+# program.
+is_typescript() { head -c 512 "$1" 2>/dev/null | grep -aq 'Varlatch CLI'; }
+is_native() { [ "$(head -c 4 "$1" 2>/dev/null | tail -c 3 | tr -d '\0')" = ELF ]; }
 
 # How the CLI is installed, which decides whether we may replace it:
-#   release <path>   the single-file release build (varlatch-cli-X.cjs)
+#   release <path>   a release's CLI: native, or the single-file build
+#   homebrew <path>  Homebrew's file: update with brew
 #   checkout <path>  a build inside a source checkout: update with git
 #   custom           a varlatchCommand with arguments, or unrecognized
 #   missing          not on PATH
 cli_install() {
   case "$CMD" in *[[:space:]]*) echo custom; return ;; esac
-  local path real
+  local path real version
   path=$(command -v "$CMD" 2>/dev/null) || { echo missing; return; }
   real=$(readlink -f "$path")
+  case "$path:$real" in
+    */Cellar/* | */home/linuxbrew/.linuxbrew/*) echo "homebrew $path"; return ;;
+  esac
   if git -C "$(dirname "$real")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "checkout $real"
-  elif head -c 400 "$real" 2>/dev/null | grep -q 'Varlatch CLI'; then
+  elif is_typescript "$real"; then
     echo "release $path"
+  elif is_native "$real"; then
+    # A development build says so in its version, and has no self-update.
+    version=$(cli_version)
+    case "$version" in "" | *-dev) echo custom ;; *) echo "release $path" ;; esac
   else
     echo custom
   fi
@@ -139,9 +154,11 @@ latest_release() {
   echo "${tag#v}"
 }
 
-# True when version $1 is newer than $2.
+# True when version $1 is newer than $2. `sort -V` puts a "~" suffix before
+# the bare version, as a prerelease (0.50.0-rc.3) comes before its release.
 version_gt() {
-  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+  local a=${1/-/\~} b=${2/-/\~}
+  [ "$a" != "$b" ] && [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -n1)" = "$a" ]
 }
 
 release_url() { echo "https://github.com/$RELEASE_REPO/releases/tag/v$1"; }
@@ -172,7 +189,7 @@ host_of() { local h=${1#*://}; echo "${h%%/*}"; }
 # cannot be read.
 server_version() {
   curl -fsS --max-time 10 "$1/v1/meta" 2>/dev/null | jq -r '.serverVersion // empty' 2>/dev/null \
-    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$' || true
 }
 
 # For upgrade-cli and install-cli, which run in a terminal.
@@ -183,29 +200,64 @@ need_node() {
   major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
   [ "$major" -ge 22 ] 2>/dev/null && return 0
   if command -v omarchy >/dev/null 2>&1; then
-    die "the release CLI needs Node.js 22 or newer (found: $(node --version 2>/dev/null || echo none)). Install it with: omarchy install dev-env node"
+    die "the CLI of release $1 needs Node.js 22 or newer (found: $(node --version 2>/dev/null || echo none)). Install it with: omarchy install dev-env node"
   fi
-  die "the release CLI needs Node.js 22 or newer (found: $(node --version 2>/dev/null || echo none))."
+  die "the CLI of release $1 needs Node.js 22 or newer (found: $(node --version 2>/dev/null || echo none))."
 }
 
-# Download release $1's single-file CLI into directory $2 and check it: the
-# signature on SHA256SUMS when the release carries one and cosign is
-# installed, the file's own line in SHA256SUMS, and the version it reports.
-# Sets $asset and $signature; dies before anything is installed.
+release_base() { echo "https://github.com/$RELEASE_REPO/releases/download/v$1"; }
+
+# The line for exactly file $1 in $2, the text of a SHA256SUMS. Fails unless
+# there is one such line.
+sums_line() {
+  local found
+  found=$(grep -E "^[0-9a-f]{64} [ *]${1//./\\.}\$" <<<"$2") || return 1
+  [ "$(wc -l <<<"$found")" -eq 1 ] || return 1
+  echo "$found"
+}
+
+# The CLI release $1 has for this machine, by what its SHA256SUMS (text $2)
+# lists: the native program, else the single-file build, which Node.js runs.
+release_asset() {
+  local arch="" name
+  case "$(uname -m)" in
+    x86_64 | amd64) arch=amd64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+  esac
+  for name in ${arch:+"varlatch-$1-linux-$arch"} "varlatch-cli-$1.cjs"; do
+    if sums_line "$name" "$2" >/dev/null; then echo "$name"; return 0; fi
+  done
+  return 1
+}
+
+# The name of release $1's CLI for this machine; empty when there is none.
+released_cli() {
+  release_asset "$1" "$(curl -fsSL --max-time 10 "$(release_base "$1")/SHA256SUMS" 2>/dev/null)" || true
+}
+
+# Download release $1's CLI for this machine into directory $2 and check it:
+# the signature on SHA256SUMS, the file's own line in SHA256SUMS, and the
+# version it reports. A native program checks the signature itself, as
+# Varlatch's install.sh has it do, and every release with one is signed; the
+# signature of an older release is checked when it carries one and cosign is
+# installed. Sets $asset and $signature; dies before anything is installed.
 fetch_release() {
-  local version=$1 dir=$2 base got
-  asset="varlatch-cli-$version.cjs"
-  base="https://github.com/$RELEASE_REPO/releases/download/v$version"
-  echo "Downloading $asset from $RELEASE_REPO..."
-  curl -fsL -o "$dir/$asset" "$base/$asset" && curl -fsL -o "$dir/SHA256SUMS" "$base/SHA256SUMS" \
-    || die "download failed."
+  local version=$1 dir=$2 base got identity
+  base=$(release_base "$version")
+  echo "Downloading varlatch $version from $RELEASE_REPO..."
+  curl -fsSL -o "$dir/SHA256SUMS" "$base/SHA256SUMS" || die "download failed: release $version has no SHA256SUMS."
+  asset=$(release_asset "$version" "$(cat "$dir/SHA256SUMS")") \
+    || die "release $version has no CLI for this machine ($(uname -m)). Nothing was installed."
+  case "$asset" in *.cjs) need_node "$version" ;; esac
+  curl -fsSL -o "$dir/$asset" "$base/$asset" || die "download failed: $asset."
   curl -fsSL -o "$dir/SHA256SUMS.sigstore.json" "$base/SHA256SUMS.sigstore.json" 2>/dev/null \
     || rm -f "$dir/SHA256SUMS.sigstore.json"
 
+  identity="https://github.com/$RELEASE_REPO/.github/workflows/release.yml@refs/tags/v$version"
   if [ -f "$dir/SHA256SUMS.sigstore.json" ]; then
     if command -v cosign >/dev/null 2>&1; then
       cosign verify-blob "$dir/SHA256SUMS" --bundle "$dir/SHA256SUMS.sigstore.json" \
-        --certificate-identity "https://github.com/$RELEASE_REPO/.github/workflows/release.yml@refs/tags/v$version" \
+        --certificate-identity "$identity" \
         --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null 2>&1 \
         || die "the signature on SHA256SUMS does NOT verify. Nothing was installed."
       signature="verified: signed by the $RELEASE_REPO release workflow for v$version"
@@ -215,23 +267,73 @@ fetch_release() {
   else
     signature="none: this release carries no signature"
   fi
-  # Check this asset's own line; --ignore-missing would pass an unlisted file.
-  (cd "$dir" && grep -E "^[0-9a-f]{64} [ *]$asset\$" SHA256SUMS | sha256sum --check --status) \
+  (cd "$dir" && sums_line "$asset" "$(cat SHA256SUMS)" | sha256sum --check --status) \
     || die "$asset does not match SHA256SUMS. Nothing was installed."
-  got=$(node "$dir/$asset" --version 2>/dev/null | sed -nE '1s/^varlatch ([0-9][^ ]*).*/\1/p')
-  [ "$got" = "$version" ] || die "the downloaded CLI reports version \"$got\", expected $version."
+
+  case "$asset" in
+    *.cjs) got=$(node "$dir/$asset" --version 2>/dev/null | parse_version) ;;
+    *)
+      [ -f "$dir/SHA256SUMS.sigstore.json" ] || die "release $version carries no signature. Nothing was installed."
+      chmod 700 "$dir/$asset"
+      got=$("$dir/$asset" --version 2>/dev/null | parse_version) ;;
+  esac
+  [ "$got" = "$version" ] || die "the downloaded CLI reports version \"$got\", expected $version. Nothing was installed."
+  case "$asset" in
+    *.cjs) ;;
+    *)
+      "$dir/$asset" verify-release --version "$version" --sums "$dir/SHA256SUMS" \
+        --bundle "$dir/SHA256SUMS.sigstore.json" --file "$dir/$asset=$asset" >/dev/null \
+        || die "the signature on SHA256SUMS does NOT verify. Nothing was installed."
+      signature="verified: signed by the $RELEASE_REPO release workflow for v$version" ;;
+  esac
 }
 
-# Put the checked file $1 at $2: written next to it, then renamed over it,
-# so there is never a half-written CLI, and a symlink is replaced rather
-# than followed. Uses sudo when the directory is not writable.
+# A Compose installation is on this machine, where the operations guide puts
+# it: its host commands stay the TypeScript CLI's, as varlatch-ts.
+COMPOSE_DIR="${VARLATCH_COMPOSE_DIR:-/srv/varlatch}"
+compose_here() { [ -f "$COMPOSE_DIR/varlatch-install.json" ] || [ -f "$COMPOSE_DIR/docker-compose.yml" ]; }
+
+# The TypeScript CLI at $2 is to be kept as varlatch-ts: the new CLI $1 is
+# native, and this machine has a Compose installation.
+keeps_typescript() { case "$1" in *.cjs) return 1 ;; esac; is_typescript "$2" && compose_here; }
+
+# Put the checked file $1 at $2, which must then report version $3: written
+# next to it, then renamed over it, so there is never a half-written CLI, and
+# a symlink is replaced rather than followed. What was there comes back when
+# the new CLI does not run in its place. Uses sudo when the directory is not
+# writable.
 put_cli() {
-  local dir sudo=""
+  local dir sudo="" old="" keep="" got
   dir=$(dirname "$2")
   [ -w "$dir" ] || { sudo="sudo"; echo "$dir is not writable; using sudo."; }
+  if keeps_typescript "$1" "$2"; then
+    keep="$dir/varlatch-ts"
+    if [ -e "$keep" ] && ! is_typescript "$keep"; then
+      die "$keep exists and is not the TypeScript CLI; move it away, then run this again. Nothing was installed."
+    fi
+  fi
+  if [ -e "$2" ] || [ -L "$2" ]; then
+    old="$dir/.varlatch-old.$$"
+    $sudo cp -a "$2" "$old" || { $sudo rm -f "$old"; die "install failed. Nothing was installed."; }
+  fi
   $sudo install -m 755 "$1" "$dir/.varlatch-new.$$" \
     && $sudo mv -f "$dir/.varlatch-new.$$" "$2" \
-    || { $sudo rm -f "$dir/.varlatch-new.$$"; die "install failed."; }
+    || { $sudo rm -f "$dir/.varlatch-new.$$" "$old"; die "install failed."; }
+  got=$("$2" --version 2>/dev/null | parse_version)
+  if [ "$got" != "$3" ]; then
+    if [ -n "$old" ]; then
+      $sudo mv -f "$old" "$2" && die "the new CLI does not run at $2; the one that was there is back."
+      die "the new CLI does not run at $2, and the one that was there could not be put back: it is $old."
+    fi
+    $sudo rm -f "$2"
+    die "the new CLI does not run at $2; it was removed again."
+  fi
+  if [ -n "$keep" ]; then
+    $sudo mv -f "$old" "$keep"
+    echo "Kept the TypeScript CLI as $keep: the Compose installation in $COMPOSE_DIR needs it for its host commands."
+  elif [ -n "$old" ]; then
+    $sudo rm -f "$old"
+  fi
 }
 
 case "${1:-}" in
@@ -562,8 +664,9 @@ case "${1:-}" in
       choice=$(notify-send -a Varlatch -A "update=Update" -A "notes=Release notes" --wait "Varlatch" \
         "CLI $latest is available (you have $current)." || true)
     else
+      how=""; [ "$install" = homebrew ] && how=" Update it with: brew upgrade varlatch"
       choice=$(notify-send -a Varlatch -A "notes=Release notes" --wait "Varlatch" \
-        "CLI $latest is available (you have $current)." || true)
+        "CLI $latest is available (you have $current).$how" || true)
     fi
     case "$choice" in
       update) exec omarchy-launch-floating-terminal-with-presentation "$0 upgrade-cli $latest" ;;
@@ -572,37 +675,36 @@ case "${1:-}" in
     ;;
 
   upgrade-cli)
-    # Interactive, in a terminal: the documented CLI install, automated.
-    # Download the release's single-file CLI and SHA256SUMS, check the
-    # signature when the release carries one, check the checksum, show what
-    # was verified, and replace the CLI only after the user confirms.
+    # Interactive, in a terminal. A native CLI updates itself, and so does
+    # the single-file TypeScript CLI (from 0.11.0) to a release that still
+    # has that build: both show what they checked and ask before replacing
+    # anything. A release with native programs replaces the TypeScript CLI
+    # the way Varlatch's install.sh does, which its self-update cannot.
     set +e
-    target="${2:-}"
+    target="${2:-}"; target=${target#v}
 
     read -r install path <<<"$(cli_install)"
-
-    # From 0.11.0 the CLI updates itself (same checks, and it asks before
-    # replacing anything); older ones get the same steps done here.
-    # (Help captured first: `grep -q` closing the pipe early would fail it
-    # under pipefail.)
-    help=""; [ "$install" = release ] && help=$("$path" --help 2>&1)
-    if [[ "$help" == *self-update* ]]; then
-      if [ -w "$(dirname "$path")" ]; then
-        "$path" self-update ${target:+"$target"}; rc=$?
-      else
-        echo "$(dirname "$path") is not writable; using sudo."
-        sudo "$(command -v node)" "$path" self-update ${target:+"$target"}; rc=$?
-      fi
-      "$0" version-info --force >/dev/null 2>&1; refresh_version
-      exit $rc
-    fi
-
     case "$install" in
       release) ;;
+      homebrew) die "$path is installed with Homebrew. Update it with: brew upgrade varlatch" ;;
       checkout) die "$path is built from a source checkout. Update it there: git pull, then pnpm install && pnpm build." ;;
       missing) exec "$0" install-cli ;;
       *) die "varlatchCommand is \"$CMD\", which the plugin does not manage. Update it by hand." ;;
     esac
+
+    # self_update <the file it replaces> [what runs it under sudo]
+    self_update() {
+      local dir rc; dir=$(dirname "$1")
+      if [ -w "$dir" ]; then
+        "$path" self-update ${target:+"$target"}; rc=$?
+      else
+        echo "$dir is not writable; using sudo."
+        sudo ${2:+"$2"} "$path" self-update ${target:+"$target"}; rc=$?
+      fi
+      "$0" version-info --force >/dev/null 2>&1; refresh_version
+      exit $rc
+    }
+    if is_native "$(readlink -f "$path")"; then self_update "$(readlink -f "$path")"; fi
 
     current=$(cli_version)
     [ -n "$target" ] || target=$(latest_release)
@@ -611,7 +713,13 @@ case "${1:-}" in
     if [ -n "$current" ] && ! version_gt "$target" "$current"; then
       echo "varlatch $current is up to date."; exit 0
     fi
-    need_node
+    # (Help captured first: `grep -q` closing the pipe early would fail it
+    # under pipefail. sudo may have a PATH without node, so it is named.)
+    asset=$(released_cli "$target")
+    if [ "${asset%.cjs}" != "$asset" ]; then
+      help=$("$path" --help 2>&1)
+      if [[ "$help" == *self-update* ]]; then self_update "$path" "$(command -v node)"; fi
+    fi
 
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
     fetch_release "$target" "$tmp"
@@ -623,13 +731,20 @@ case "${1:-}" in
     echo "  signature: $signature"
     echo "  changes:   $(release_url "$target")"
     echo
-    echo "  Pre-1.0 releases may change the CLI and the /v1 API. If this machine"
-    echo "  runs a Varlatch installation, upgrade it first (varlatch upgrade)."
+    if [ "${asset%.cjs}" = "$asset" ]; then
+      echo "  From this release the CLI is a program of its own: it does not need"
+      echo "  Node.js. Your sign-ins and settings carry over."
+      keeps_typescript "$tmp/$asset" "$path" \
+        && echo "  The present CLI is kept beside it as varlatch-ts, for the Compose installation here."
+    else
+      echo "  Pre-1.0 releases may change the CLI and the /v1 API. If this machine"
+      echo "  runs a Varlatch installation, upgrade it first (varlatch upgrade)."
+    fi
     echo
     read -rp "Install? [y/N] " answer
     [[ "$answer" =~ ^[yY] ]] || { echo "Nothing installed."; exit 130; }
 
-    put_cli "$tmp/$asset" "$path"
+    put_cli "$tmp/$asset" "$path" "$target"
     echo "Installed: $(eval "$CMD --version")"
     "$0" version-info --force >/dev/null 2>&1
     refresh_version
@@ -643,7 +758,7 @@ case "${1:-}" in
     read -r install path <<<"$(cli_install)"
     case "$install" in
       missing) ;;
-      release) exec "$0" upgrade-cli ;;
+      release | homebrew) exec "$0" upgrade-cli ;;
       *) echo "varlatch is already installed ($(eval "$CMD --version" 2>/dev/null | head -n1))."; exit 0 ;;
     esac
 
@@ -660,8 +775,7 @@ case "${1:-}" in
       target=$(server_version "$server")
       if [ -z "$target" ]; then
         echo "Could not read the version $host runs; using the latest release."
-      elif ! curl -fsIL --max-time 10 -o /dev/null \
-          "https://github.com/$RELEASE_REPO/releases/download/v$target/varlatch-cli-$target.cjs"; then
+      elif [ -z "$(released_cli "$target")" ]; then
         echo "$host runs $target, which has no release CLI; using the latest release."
         echo "If the newer CLI does not work with it, upgrade the server (varlatch upgrade)."
         target=""
@@ -672,7 +786,6 @@ case "${1:-}" in
     [ -n "$target" ] || target=$(latest_release)
     [ -n "$target" ] || die "cannot find the latest release of $RELEASE_REPO (offline?)."
     target=${target#v}
-    need_node
 
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
     fetch_release "$target" "$tmp"
@@ -689,7 +802,7 @@ case "${1:-}" in
     [[ "$answer" =~ ^[yY] ]] || { echo "Nothing installed."; exit 130; }
 
     mkdir -p "$(dirname "$dest")"
-    put_cli "$tmp/$asset" "$dest"
+    put_cli "$tmp/$asset" "$dest" "$target"
     echo "Installed: $("$dest" --version | head -n1)"
 
     # The widget finds the CLI through a login shell's PATH; without
