@@ -55,10 +55,11 @@ EOF
   cat > "$T/stub/curl" <<'EOF'
 #!/usr/bin/env bash
 echo "curl $*" >> "$HOME/curl.log"
-out=""; url=""; head=false
+out=""; url=""; head=false; write_code=false
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift ;;
+    -w) write_code=true; shift ;;
     http*) url=$1 ;;
     --*) ;;
     -*I*) head=true ;;
@@ -70,7 +71,16 @@ body=""; file=""
 case "$url" in
   */releases/latest) body="{\"tag_name\":\"v${FAKE_LATEST:-0.15.1}\"}" ;;
   */v1/meta) [ -n "${FAKE_SERVER_VERSION:-}" ] || exit 22; body="{\"serverVersion\":\"$FAKE_SERVER_VERSION\"}" ;;
-  */releases/download/*) file="$HOME/releases/${url#*/releases/download/}"; [ -f "$file" ] || exit 22 ;;
+  */releases/download/*)
+    if [[ "$url" == */SHA256SUMS ]] && [ -n "${FAKE_SUMS_STATUS:-}" ]; then
+      $write_code && { printf '%s' "$FAKE_SUMS_STATUS"; exit 0; }
+      exit 22
+    fi
+    file="$HOME/releases/${url#*/releases/download/}"
+    if [ ! -f "$file" ]; then
+      $write_code && { printf '404'; exit 0; }
+      exit 22
+    fi ;;
   *) exit 6 ;;
 esac
 $head && exit 0
@@ -79,6 +89,8 @@ if [ -n "$file" ]; then
 elif [ -n "$out" ]; then printf '%s' "$body" > "$out"
 else printf '%s\n' "$body"
 fi
+$write_code && printf '200'
+exit 0
 EOF
   chmod +x "$T"/stub/*
   export PATH="$T/stub:$BASE_PATH"
@@ -88,7 +100,7 @@ EOF
   MENU="$T/.config/omarchy/extensions/omarchy-menu.jsonc"
   widget '{}'
   unset FAKE_VERSION FAKE_WAIT FAKE_CHOICE FAKE_LOGIN_RC FAKE_LOGIN_SLEEP FAKE_START_FAIL \
-    FAKE_LATEST FAKE_CURL_FAIL FAKE_SERVER_VERSION FAKE_STDERR FAKE_STATUS_FAIL FAKE_STATUS_SLEEP VARLATCH_SERVER
+    FAKE_LATEST FAKE_CURL_FAIL FAKE_SUMS_STATUS FAKE_SERVER_VERSION FAKE_STDERR FAKE_STATUS_FAIL FAKE_STATUS_SLEEP VARLATCH_SERVER
 }
 
 # The widget's entry in shell.json: the fake CLI plus the given settings.
@@ -480,7 +492,7 @@ no_node() {
   mkdir -p "$T/nonode"
   local c
   for c in bash env sh cat chmod cp cut date dirname git grep head id install jq ln ls mkdir mktemp mv \
-      python3 readlink rm sed seq setsid sha256sum sleep sort tail tee tr uname wc flock kill basename; do
+      python3 readlink rm rmdir sed seq setsid sha256sum sleep sort tail tee tr uname wc flock kill basename; do
     ln -sf "$(command -v $c)" "$T/nonode/$c"
   done
   PATH="$T/stub:$T/nonode"
@@ -496,8 +508,8 @@ new_home; widget_default_cli '{}'; make_native_release 10.0.0
 printf '\ny\n' | (no_node; FAKE_LATEST=10.0.0 "$H" install-cli) > "$T/out" 2>&1; rc=$?
 check "the latest release is native: installed, without Node.js" \
   "[ $rc -eq 0 ] && [ \"\$(\"\$T/.local/bin/varlatch\" --version)\" = '$NATIVE_VERSION' ]" "$(cat "$T/out")"
-check "the native program checked the release's signature" \
-  "calls | grep -q 'native verify-release --version 10.0.0 --sums .*/SHA256SUMS --bundle .*/SHA256SUMS.sigstore.json --file .*=varlatch-10.0.0-linux-$ARCH' && grep -q 'signature: verified' '$T/out'" "$(calls)"
+check "the native program checked the release's signature (bootstrap wording without cosign)" \
+  "calls | grep -q 'native verify-release --version 10.0.0 --sums .*/SHA256SUMS --bundle .*/SHA256SUMS.sigstore.json --file .*=varlatch-10.0.0-linux-$ARCH' && grep -q 'checked by the downloaded binary (install cosign for an independent check)' '$T/out'" "$(cat "$T/out")"
 new_home; widget_default_cli '{}'; make_release 9.9.8; make_native_release 10.0.0
 printf 'vl.example.com\ny\nn\n' | FAKE_SERVER_VERSION=9.9.8 FAKE_LATEST=10.0.0 "$H" install-cli > "$T/out" 2>&1
 check "a server of the TypeScript generation: its single file" \
@@ -601,6 +613,57 @@ check "a native development build is updated by hand" "\"\$H\" version-info | jq
 widget '{}'
 "$H" upgrade-cli > "$T/out" 2>&1
 check "a source checkout is updated by hand" "grep -q 'built from a source checkout' '$T/out'" "$(cat "$T/out")"
+
+section "security and hardening (review fixes)"
+new_home; widget '{"checkUpdates": "on"}'
+now=$(date +%s)
+jq -n --argjson c $((now - 50000)) --argjson a $((now - 50000)) '{latest: "0.15.0", checkedAt: $c, attemptedAt: $a, notified: ""}' > "$U"
+FAKE_LATEST='0.50.0;touch /tmp/should-not-run' "$H" version-info > "$T/vout" 2>&1
+check "hostile GitHub release tag is rejected and never cached" \
+  "jq -e '.latest == \"0.15.0\" and .updateAvailable == false' '$T/vout' >/dev/null" "$(cat "$T/vout")"
+jq -n --argjson c "$now" --argjson a "$now" '{latest: "0.99.0$(id)", checkedAt: $c, attemptedAt: $a, notified: ""}' > "$U"
+"$H" version-info > "$T/vout" 2>&1
+check "hostile cached version in update.json is ignored on read" \
+  "jq -e '.latest == \"\" and .updateAvailable == false' '$T/vout' >/dev/null" "$(cat "$T/vout")"
+"$H" notify-update 0.15.0 '0.50.0;id' release > "$T/out" 2>&1; rc=$?
+check "notify-update rejects a hostile version" "[ $rc -ne 0 ]"
+: > "$T/calls.log"; FAKE_CHOICE=update "$H" notify-update 0.15.0 0.50.0 release > "$T/out" 2>&1
+check "notify-update shell-quotes helper path and version" \
+  "calls | grep -Fq \"'$H' upgrade-cli '0.50.0'\"" "$(calls)"
+"$H" upgrade-cli '0.50.0;id' > "$T/out" 2>&1; rc=$?
+check "upgrade-cli rejects a hostile version argument" "[ $rc -ne 0 ] && grep -q 'invalid version' '$T/out'" "$(cat "$T/out")"
+
+new_home; make_native_release 10.0.0 -DBREAKS_WHEN_STAGED; typescript_cli "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1; rc=$?
+check "a binary that fails staged launch-test never touches the CLI" \
+  "[ $rc -ne 0 ] && grep -q 'staged CLI does not run' '$T/out' && \"\$T/bin/varlatch\" --version | grep -q 9.9.8 && [ -z \"\$(leftovers '$T/bin')\" ]" "$(cat "$T/out")"
+
+new_home; make_native_release 10.0.0; typescript_cli "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+mkdir "$T/bin/.varlatch-install.lock"
+printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1; rc=$?
+check "a held per-target lock refuses the replacement" \
+  "[ $rc -ne 0 ] && grep -q 'another install or update is running' '$T/out' && \"\$T/bin/varlatch\" --version | grep -q 9.9.8" "$(cat "$T/out")"
+rmdir "$T/bin/.varlatch-install.lock"
+
+new_home; mkdir -p "$T/bin"
+printf '#!/bin/sh\n# installed with Homebrew\necho "varlatch 0.23.0"\n' > "$T/bin/varlatch"
+chmod +x "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+"$H" upgrade-cli 10.0.0 > "$T/out" 2>&1; rc=$?
+check "legacy Homebrew wrapper marker is recognized as Homebrew" \
+  "[ $rc -ne 0 ] && grep -q 'brew upgrade varlatch' '$T/out'" "$(cat "$T/out")"
+
+new_home; widget_default_cli '{}'; make_release 9.9.9
+printf 'vl.example.com\ny\nn\n' | FAKE_SERVER_VERSION=9.9.8 FAKE_SUMS_STATUS=500 FAKE_LATEST=9.9.9 "$H" install-cli > "$T/out" 2>&1; rc=$?
+check "install-cli treats a failed manifest fetch as a failure, not no release CLI" \
+  "[ $rc -ne 0 ] && grep -q 'could not fetch SHA256SUMS' '$T/out' && ! grep -q 'has no release CLI' '$T/out' && [ ! -e '$T/.local/bin/varlatch' ]" "$(cat "$T/out")"
+new_home; make_release 9.9.9; typescript_cli "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+FAKE_SUMS_STATUS=500 "$H" upgrade-cli 9.9.9 > "$T/out" 2>&1; rc=$?
+check "upgrade-cli treats a failed manifest fetch as a failure" \
+  "[ $rc -ne 0 ] && grep -q 'could not fetch SHA256SUMS' '$T/out' && \"\$T/bin/varlatch\" --version | grep -q 9.9.8" "$(cat "$T/out")"
 
 echo
 echo "$passed passed, $failed failed"

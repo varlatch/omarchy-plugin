@@ -16,7 +16,14 @@
 int main(int argc, char **argv) {
   const char *command = argc > 1 ? argv[1] : "";
 #ifdef BREAKS_IN_PLACE
-  if (!strstr(argv[0], "-linux-")) return 126;
+  {
+    const char *base = strrchr(argv[0], '/');
+    base = base ? base + 1 : argv[0];
+    if (!strcmp(base, "varlatch")) return 126;
+  }
+#endif
+#ifdef BREAKS_WHEN_STAGED
+  if (strstr(argv[0], ".varlatch-new.")) return 126;
 #endif
   if (!strcmp(command, "--version")) {
     puts("varlatch " REPORTS);

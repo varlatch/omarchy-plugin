@@ -89,11 +89,13 @@ run there, and keeps your sign-ins and settings. On the host of a Compose
 installation the old CLI stays beside the new one as `varlatch-ts`, because
 that installation's host commands need it.
 
-An install or update takes the file that the release's `SHA256SUMS` lists
-for this machine, and always checks it against that list. The native program
-also checks that Varlatch's release workflow signed `SHA256SUMS`, and nothing
-is installed when that fails. For an earlier release, the signature is
-checked when the release carries one and `cosign` is installed.
+An install or update downloads over HTTPS from GitHub, takes the file that
+the release's `SHA256SUMS` lists for this machine, and always checks its
+SHA-256 against that list. When `cosign` is installed, it independently
+verifies the Sigstore signature on `SHA256SUMS`. Without `cosign`, a native
+CLI also runs its own `verify-release` bootstrap check (the same self-check
+that Varlatch's `install.sh` runs; install `cosign` for an independent
+signature check). Nothing is installed when a check fails.
 
 This works only for a release's CLI. One installed with Homebrew
 (`brew upgrade varlatch`), one built from a source checkout, or a
