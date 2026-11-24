@@ -110,7 +110,14 @@ notify() { notify-send -a Varlatch "Varlatch" "$1"; }
 
 # "0.10.1" from `varlatch 0.10.1 (migration 20)`, "0.50.0" from
 # `varlatch 0.50.0`; empty when the CLI is missing or predates --version.
-cli_version() { eval "$CMD --version" 2>/dev/null | parse_version || true; }
+run_cli() {
+  if [ -x "$CMD" ] && [ ! -d "$CMD" ]; then
+    "$CMD" "$@"
+  else
+    eval "$CMD $(printf '%q ' "$@")"
+  fi
+}
+cli_version() { run_cli --version 2>/dev/null | parse_version || true; }
 parse_version() {
   local raw
   raw=$(sed -nE '1s/^varlatch ([0-9][^ ]*).*/\1/p')
@@ -131,14 +138,32 @@ clean_version() {
 }
 shell_quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
+# True when $1 is owned by root (uid 0) and not group- or other-writable.
+is_root_safe() {
+  local p=$1 info uid mode
+  [ -e "$p" ] || return 1
+  info=$(stat -c '%u %a' "$p" 2>/dev/null) || return 1
+  uid=${info%% *}; mode=${info#* }
+  [ "$uid" = "0" ] && [ $((8#$mode & 8#022)) -eq 0 ]
+}
+
 # A file is the TypeScript CLI's single-file build (varlatch-cli-X.cjs, up to
 # 0.23): its banner is in its first lines. From 0.50 the CLI is a native
 # program.
 is_typescript() { head -c 512 "$1" 2>/dev/null | grep -aq 'Varlatch CLI'; }
 is_native() { [ "$(head -c 4 "$1" 2>/dev/null | tail -c 3 | tr -d '\0')" = ELF ]; }
 
+# Legacy Homebrew wrapper marker: only checked in "#!" script files so a
+# compiled native binary's own error strings never trigger it.
+has_homebrew_marker() {
+  local f=$1
+  [ -f "$f" ] || return 1
+  [ "$(head -c 2 "$f" 2>/dev/null || true)" = "#!" ] || return 1
+  head -c 512 "$f" 2>/dev/null | grep -aq 'installed with Homebrew'
+}
+
 # True when $1 (as given, or symlink-resolved) belongs to Homebrew, or carries
-# Homebrew's legacy wrapper marker.
+# Homebrew's legacy wrapper marker (in a "#!" file).
 is_homebrew() {
   local entry=$1 real=""
   [ -e "$entry" ] || [ -L "$entry" ] || return 1
@@ -149,8 +174,8 @@ is_homebrew() {
   case "$real" in
     /home/linuxbrew/.linuxbrew/* | /opt/homebrew/* | /usr/local/Homebrew/* | /usr/local/Cellar/* | */Cellar/*) return 0 ;;
   esac
-  grep -aq 'installed with Homebrew' "$entry" 2>/dev/null && return 0
-  [ "$real" != "$entry" ] && grep -aq 'installed with Homebrew' "$real" 2>/dev/null && return 0
+  has_homebrew_marker "$entry" && return 0
+  [ "$real" != "$entry" ] && has_homebrew_marker "$real" && return 0
   return 1
 }
 
@@ -161,9 +186,14 @@ is_homebrew() {
 #   custom           a varlatchCommand with arguments, or unrecognized
 #   missing          not on PATH
 cli_install() {
-  case "$CMD" in *[[:space:]]*) echo custom; return ;; esac
   local path real version
-  path=$(command -v "$CMD" 2>/dev/null) || { echo missing; return; }
+  # Existing literal path first, so paths containing spaces are supported.
+  if [ -x "$CMD" ] && [ ! -d "$CMD" ]; then
+    path=$CMD
+  else
+    case "$CMD" in *[[:space:]]*) echo custom; return ;; esac
+    path=$(command -v "$CMD" 2>/dev/null) || { echo missing; return; }
+  fi
   if is_homebrew "$path"; then echo "homebrew $path"; return; fi
   real=$(readlink -f "$path")
   if git -C "$(dirname "$real")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -349,28 +379,56 @@ compose_here() { [ -f "$COMPOSE_DIR/varlatch-install.json" ] || [ -f "$COMPOSE_D
 keeps_typescript() { case "$1" in *.cjs) return 1 ;; esac; is_typescript "$2" && compose_here; }
 
 # Put the checked file $1 at $2, which must report version $3 and have SHA-256
-# $4: staged inside the destination directory (with sudo when root's), hashed
-# THERE, launch-tested THERE, then renamed atomically over $2 while keeping
-# the old file beside it until the new one answers at $2 (put back by one
-# rename on failure). Serialized with a per-target lock and re-checked for
-# Homebrew right before replacing.
+# $4: serialized with flock on a per-target lock file, staged inside the
+# destination directory (with sudo only when root-owned and not group/other-
+# writable), hashed THERE, launch-tested THERE, re-checked for Homebrew
+# immediately before atomic rename over $2, and rolled back by one rename on
+# launch failure or INT/TERM/HUP until the new CLI answers at $2.
 put_cli() {
   (
     local src=$1 dest=$2 want_version=$3 want_hash=$4
-    local dir sudo="" lock staged old="" keep="" got got_hash
+    local dir sudo="" lock_key lock staged old="" keep="" got got_hash
+    local published=no verified=no
     dir=$(dirname "$dest")
-    [ -w "$dir" ] || { sudo="sudo"; echo "$dir is not writable; using sudo."; }
-    lock="$dir/.varlatch-install.lock"
-    $sudo mkdir "$lock" 2>/dev/null \
-      || die "another install or update is running in $dir (or stale lock $lock). Nothing was installed."
+    if [ ! -w "$dir" ]; then
+      if is_root_safe "$dir" && { [ ! -e "$dest" ] || [ -L "$dest" ] || is_root_safe "$dest"; }; then
+        sudo="sudo"
+        echo "$dir is not writable; using sudo."
+      else
+        die "$dir is not writable and not a root-owned protected directory; refusing sudo. Install by hand: install -m 755 $(shell_quote "$src") $(shell_quote "$dest")"
+      fi
+    fi
+
+    mkdir -p "$STATE_DIR"
+    lock_key=$(printf '%s/%s' "$(cd "$dir" && pwd -P)" "$(basename "$dest")" | sha256sum | cut -d' ' -f1)
+    lock="$STATE_DIR/install-$lock_key.lock"
+    exec 9>"$lock"
+    flock -n 9 || die "another install or update is running for $dest. Nothing was installed."
+
     staged="$dir/.varlatch-new.$$"
     cleanup_put() {
       $sudo rm -f "$staged" 2>/dev/null || true
-      $sudo rmdir "$lock" 2>/dev/null || true
+      if [ "$verified" != yes ]; then
+        if [ "$published" = yes ]; then
+          if [ -n "$old" ] && { [ -e "$old" ] || [ -L "$old" ]; }; then
+            if $sudo mv -f "$old" "$dest" 2>/dev/null; then
+              echo "varlatch: restored the previous CLI at $dest." >&2
+            else
+              echo "varlatch: could not restore $dest automatically; backup kept at $old." >&2
+            fi
+          else
+            $sudo rm -f "$dest" 2>/dev/null || true
+          fi
+        elif [ -n "$old" ]; then
+          $sudo rm -f "$old" 2>/dev/null || true
+        fi
+      fi
     }
     trap cleanup_put EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
-    # Re-check Homebrew right before replacing, under the per-target lock.
     if is_homebrew "$dest"; then
       die "$dest is installed with Homebrew. Update it with: brew upgrade varlatch"
     fi
@@ -397,22 +455,39 @@ put_cli() {
 
     if [ -e "$dest" ] || [ -L "$dest" ]; then
       old="$dir/.varlatch-old.$$"
-      $sudo cp -a "$dest" "$old" || { $sudo rm -f "$old"; die "install failed. Nothing was installed."; }
+      $sudo cp -a "$dest" "$old" || { $sudo rm -f "$old"; old=""; die "install failed. Nothing was installed."; }
     fi
-    $sudo mv -f "$staged" "$dest" || { $sudo rm -f "$old"; die "install failed."; }
+
+    # Re-check Homebrew immediately before the rename.
+    if is_homebrew "$dest"; then
+      die "$dest is installed with Homebrew. Update it with: brew upgrade varlatch"
+    fi
+
+    $sudo mv -f "$staged" "$dest" || die "install failed."
+    published=yes
 
     got=$("$dest" --version 2>/dev/null | parse_version)
     if [ "$got" != "$want_version" ]; then
       if [ -n "$old" ]; then
-        $sudo mv -f "$old" "$dest" && die "the new CLI does not run at $dest; the one that was there is back."
+        if $sudo mv -f "$old" "$dest"; then
+          old=""
+          published=no
+          die "the new CLI does not run at $dest; the one that was there is back."
+        fi
         die "the new CLI does not run at $dest, and the one that was there could not be put back: it is $old."
       fi
       $sudo rm -f "$dest"
+      published=no
       die "the new CLI does not run at $dest; it was removed again."
     fi
+    verified=yes
+
     if [ -n "$keep" ]; then
-      $sudo mv -f "$old" "$keep"
-      echo "Kept the TypeScript CLI as $keep: the Compose installation in $COMPOSE_DIR needs it for its host commands."
+      if $sudo mv -f "$old" "$keep"; then
+        echo "Kept the TypeScript CLI as $keep: the Compose installation in $COMPOSE_DIR needs it for its host commands."
+      else
+        die "installed $dest, but could not move the TypeScript CLI to $keep; backup kept at $old."
+      fi
     elif [ -n "$old" ]; then
       $sudo rm -f "$old"
     fi
@@ -778,14 +853,43 @@ case "${1:-}" in
       *) die "varlatchCommand is \"$CMD\", which the plugin does not manage. Update it by hand." ;;
     esac
 
-    # self_update <the file it replaces> [what runs it under sudo]
+    # self_update <resolved target> [node path for legacy CLI]
+    # Elevates only the resolved executable (and resolved node for legacy),
+    # and only when each resolved file and its directory are root-owned and
+    # not group- or other-writable; otherwise refuses with the manual command.
     self_update() {
-      local dir rc; dir=$(dirname "$1")
-      if [ -w "$dir" ]; then
-        "$path" self-update ${target:+"$target"}; rc=$?
+      local real=$1 node_bin=${2:-} dir real_dir node_real node_dir rc manual
+      real_dir=$(dirname "$real")
+      dir=$(dirname "$path")
+      if [ -n "$node_bin" ]; then
+        # Legacy TypeScript CLI writes beside the invoked path.
+        if [ -w "$dir" ]; then
+          "$path" self-update ${target:+"$target"}; rc=$?
+        else
+          node_real=$(readlink -f "$node_bin" 2>/dev/null || echo "$node_bin")
+          node_dir=$(dirname "$node_real")
+          manual="$(shell_quote "$node_real") $(shell_quote "$real") self-update${target:+ $(shell_quote "$target")}"
+          if is_root_safe "$real" && is_root_safe "$real_dir" && is_root_safe "$dir" \
+              && is_root_safe "$node_real" && is_root_safe "$node_dir"; then
+            echo "$dir is not writable; using sudo."
+            sudo "$node_real" "$real" self-update ${target:+"$target"}; rc=$?
+          else
+            die "refusing to run sudo on $real (target, node, and their directories must be root-owned and not group- or other-writable). Update by hand: $manual"
+          fi
+        fi
       else
-        echo "$dir is not writable; using sudo."
-        sudo ${2:+"$2"} "$path" self-update ${target:+"$target"}; rc=$?
+        # Native CLI writes beside the resolved file.
+        if [ -w "$real_dir" ]; then
+          "$real" self-update ${target:+"$target"}; rc=$?
+        else
+          manual="$(shell_quote "$real") self-update${target:+ $(shell_quote "$target")}"
+          if is_root_safe "$real" && is_root_safe "$real_dir"; then
+            echo "$real_dir is not writable; using sudo."
+            sudo "$real" self-update ${target:+"$target"}; rc=$?
+          else
+            die "refusing to run sudo on $real (must be root-owned and not group- or other-writable). Update by hand: $manual"
+          fi
+        fi
       fi
       "$0" version-info --force >/dev/null 2>&1; refresh_version
       exit $rc
@@ -809,7 +913,7 @@ case "${1:-}" in
     fi
     if [ "${asset%.cjs}" != "$asset" ]; then
       help=$("$path" --help 2>&1)
-      if [[ "$help" == *self-update* ]]; then self_update "$path" "$(command -v node)"; fi
+      if [[ "$help" == *self-update* ]]; then self_update "$(readlink -f "$path")" "$(command -v node)"; fi
     fi
 
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -836,7 +940,7 @@ case "${1:-}" in
     [[ "$answer" =~ ^[yY] ]] || { echo "Nothing installed."; exit 130; }
 
     put_cli "$tmp/$asset" "$path" "$target" "$expected_hash" || exit $?
-    echo "Installed: $(eval "$CMD --version")"
+    echo "Installed: $(run_cli --version)"
     "$0" version-info --force >/dev/null 2>&1
     refresh_version
     ;;

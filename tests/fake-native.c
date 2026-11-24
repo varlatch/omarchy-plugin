@@ -14,6 +14,11 @@
 #endif
 
 int main(int argc, char **argv) {
+  /* Native Go binary includes this literal in its selfupdate error text;
+   * keep it here so tests verify ELF binaries are never misclassified as
+   * Homebrew wrappers by marker scanning. */
+  static const char brew_msg[] = "installed with Homebrew";
+  (void)brew_msg;
   const char *command = argc > 1 ? argv[1] : "";
 #ifdef BREAKS_IN_PLACE
   {

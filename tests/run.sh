@@ -492,7 +492,7 @@ no_node() {
   mkdir -p "$T/nonode"
   local c
   for c in bash env sh cat chmod cp cut date dirname git grep head id install jq ln ls mkdir mktemp mv \
-      python3 readlink rm rmdir sed seq setsid sha256sum sleep sort tail tee tr uname wc flock kill basename; do
+      python3 readlink rm rmdir sed seq setsid sha256sum sleep sort stat tail tee tr uname wc flock kill basename; do
     ln -sf "$(command -v $c)" "$T/nonode/$c"
   done
   PATH="$T/stub:$T/nonode"
@@ -641,19 +641,52 @@ check "a binary that fails staged launch-test never touches the CLI" \
 
 new_home; make_native_release 10.0.0; typescript_cli "$T/bin/varlatch"
 widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
-mkdir "$T/bin/.varlatch-install.lock"
-printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1; rc=$?
-check "a held per-target lock refuses the replacement" \
+lock_key=$(printf '%s/varlatch' "$(cd "$T/bin" && pwd -P)" | sha256sum | cut -d' ' -f1)
+(
+  exec 9>"$S/install-$lock_key.lock"
+  flock -x 9
+  printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1
+  echo $? > "$T/lock.rc"
+)
+rc=$(cat "$T/lock.rc")
+check "a held per-target flock refuses the replacement (and releases automatically)" \
   "[ $rc -ne 0 ] && grep -q 'another install or update is running' '$T/out' && \"\$T/bin/varlatch\" --version | grep -q 9.9.8" "$(cat "$T/out")"
-rmdir "$T/bin/.varlatch-install.lock"
+# After lock holder exits, a follow-up update succeeds with no stale lock.
+printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1; rc=$?
+check "after the lock holder exits, no stale lock blocks the update" \
+  "[ $rc -eq 0 ] && [ \"\$(\"\$T/bin/varlatch\" --version)\" = '$NATIVE_VERSION' ]" "$(cat "$T/out")"
 
 new_home; mkdir -p "$T/bin"
 printf '#!/bin/sh\n# installed with Homebrew\necho "varlatch 0.23.0"\n' > "$T/bin/varlatch"
 chmod +x "$T/bin/varlatch"
 widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
 "$H" upgrade-cli 10.0.0 > "$T/out" 2>&1; rc=$?
-check "legacy Homebrew wrapper marker is recognized as Homebrew" \
+check "legacy Homebrew wrapper marker in #! script is recognized as Homebrew" \
   "[ $rc -ne 0 ] && grep -q 'brew upgrade varlatch' '$T/out'" "$(cat "$T/out")"
+
+# Native binary containing the string "installed with Homebrew" is NOT misclassified.
+new_home; make_native_release 10.0.0
+mkdir -p "$T/bin"; cp "$T/releases/v10.0.0/varlatch-10.0.0-linux-$ARCH" "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+check "native ELF containing Homebrew string is still classified as release" \
+  "\"\$H\" version-info | jq -e '.install == \"release\"' >/dev/null"
+
+# P1 sudo: non-root unwritable directory refuses sudo and prints manual command.
+new_home; make_native_release 10.0.0
+mkdir -p "$T/ro"; cp "$T/releases/v10.0.0/varlatch-10.0.0-linux-$ARCH" "$T/ro/varlatch"
+chmod 555 "$T/ro"
+widget "{\"varlatchCommand\": \"$T/ro/varlatch\"}"
+"$H" upgrade-cli 10.0.1 > "$T/out" 2>&1; rc=$?
+chmod 755 "$T/ro"
+check "native self-update refuses sudo on non-root unwritable dir and prints manual command" \
+  "[ $rc -ne 0 ] && grep -q 'refusing to run sudo' '$T/out' && grep -Fq \"'$T/ro/varlatch' self-update '10.0.1'\" '$T/out'" "$(cat "$T/out")"
+
+# P3 path with spaces: existing literal path is recognized as release, not custom.
+new_home; make_native_release 10.0.0
+mkdir -p "$T/my tools"; cp "$T/releases/v10.0.0/varlatch-10.0.0-linux-$ARCH" "$T/my tools/varlatch"
+widget "{\"varlatchCommand\": \"$T/my tools/varlatch\"}"
+check "existing literal CLI path with spaces is recognized as release" \
+  "\"\$H\" version-info | jq -e '.install == \"release\" and .current == \"10.0.0\"' >/dev/null"
 
 new_home; widget_default_cli '{}'; make_release 9.9.9
 printf 'vl.example.com\ny\nn\n' | FAKE_SERVER_VERSION=9.9.8 FAKE_SUMS_STATUS=500 FAKE_LATEST=9.9.9 "$H" install-cli > "$T/out" 2>&1; rc=$?
