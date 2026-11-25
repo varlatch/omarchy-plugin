@@ -52,8 +52,8 @@ BarWidget {
   onSettingsChanged: { refresh(); refreshVersion(); injectPanel() }
 
   // ---- CLI version and updates, from `varlatch-menu version-info`: the
-  // installed version, how it is installed ("release" builds can be
-  // replaced by the plugin; "checkout" and "custom" cannot), and with
+  // installed version, how it is installed (a "release" CLI can be replaced
+  // by the plugin; "homebrew", "checkout" and "custom" cannot), and with
   // checkUpdates on, the latest release (the helper caches the check).
   property string cliVersion: ""
   property string cliInstall: ""
@@ -79,9 +79,19 @@ BarWidget {
     versionProc.running = true
   }
 
+  function shellQuote(s) {
+    return "'" + String(s || "").replace(/'/g, "'\\''") + "'"
+  }
+
+  function validVersion(v) {
+    var s = String(v || "")
+    return s.length > 0 && s.length <= 64 && /^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$/.test(s)
+  }
+
   function upgradeCli() {
-    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation",
-      root.menuHelper + " upgrade-cli " + root.latestVersion])
+    var cmd = shellQuote(root.menuHelper) + " upgrade-cli"
+    if (validVersion(root.latestVersion)) cmd += " " + shellQuote(root.latestVersion)
+    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", cmd])
   }
 
   // Device sign-in (login --start / --wait) arrived in CLI 0.14.0.
@@ -91,18 +101,18 @@ BarWidget {
     return parts[0] > 0 || parts[1] > 14 || (parts[1] === 14 && parts[2] >= 0)
   }
 
-  // First run: no CLI on PATH. The helper installs the release build in a
+  // First run: no CLI on PATH. The helper installs a release's CLI in a
   // terminal, after the same checks as an update.
   readonly property bool cliMissing: sessionState === "unavailable" && cliInstall === "missing"
   function installCli() {
     Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation",
-      root.menuHelper + " install-cli"])
+      shellQuote(root.menuHelper) + " install-cli"])
   }
 
   Process {
     id: versionProc
     running: false
-    command: ["bash", "-lc", "'" + root.menuHelper + "' version-info"
+    command: ["bash", "-lc", root.shellQuote(root.menuHelper) + " version-info"
       + (root._versionMaxAge > 0 ? " --max-age " + root._versionMaxAge : "")]
     stdout: StdioCollector { id: versionStdout; waitForEnd: true }
     onExited: function (exitCode) {
@@ -110,8 +120,8 @@ BarWidget {
       if (exitCode === 0) { try { doc = JSON.parse(String(versionStdout.text || "")) } catch (e) {} }
       root.cliVersion = doc ? doc.current || "" : ""
       root.cliInstall = doc ? doc.install || "" : ""
-      root.latestVersion = doc ? doc.latest || "" : ""
-      root.updateAvailable = doc ? doc.updateAvailable === true : false
+      root.latestVersion = (doc && root.validVersion(doc.latest)) ? doc.latest : ""
+      root.updateAvailable = doc ? (doc.updateAvailable === true && root.latestVersion !== "") : false
       root.releaseUrl = doc ? doc.releaseUrl || "" : ""
       if (root._versionQueued) {
         var age = root._queuedMaxAge

@@ -658,8 +658,8 @@ Panel {
 
         // ---- Footer: newer plugin code waiting for a shell restart; the
         // CLI version, and a newer release when checkUpdates finds one.
-        // "update" only for the release build the plugin can replace; a
-        // source checkout or custom command gets the notes.
+        // "update" only for a release's CLI, which the plugin can replace; a
+        // Homebrew copy, source checkout or custom command gets the notes.
         PanelSeparator {
           visible: footer.visible || pluginUpdate.visible
           width: parent.width
@@ -716,6 +716,7 @@ Panel {
               if (!h) return ""
               var t = "CLI " + h.cliVersion
               if (h.cliInstall === "checkout") t += " · source checkout"
+              if (h.cliInstall === "homebrew") t += " · Homebrew"
               if (h.updateAvailable) t += " · <font color=\"#e0993e\">" + h.latestVersion + " available</font>"
               return t
             }

@@ -2,8 +2,10 @@
 # Offline tests for the manifest and bin/varlatch-menu. Each test runs in a
 # throwaway HOME, with the plugin linked where Omarchy puts it and
 # stand-ins for the varlatch CLI (tests/fake-varlatch), curl, notify-send,
-# and the omarchy commands. Needs bash, jq, python3, and Node.js 22 or
-# newer; with qrencode installed, the QR code is checked too.
+# and the omarchy commands. Needs bash, jq, python3, Node.js 22 or newer (the
+# CLI up to 0.23 runs on it), and cc (to build tests/fake-native.c, a
+# stand-in for the native CLI); with qrencode installed, the QR code is
+# checked too.
 #
 #   tests/run.sh
 set -uo pipefail
@@ -53,10 +55,11 @@ EOF
   cat > "$T/stub/curl" <<'EOF'
 #!/usr/bin/env bash
 echo "curl $*" >> "$HOME/curl.log"
-out=""; url=""; head=false
+out=""; url=""; head=false; write_code=false
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift ;;
+    -w) write_code=true; shift ;;
     http*) url=$1 ;;
     --*) ;;
     -*I*) head=true ;;
@@ -68,7 +71,16 @@ body=""; file=""
 case "$url" in
   */releases/latest) body="{\"tag_name\":\"v${FAKE_LATEST:-0.15.1}\"}" ;;
   */v1/meta) [ -n "${FAKE_SERVER_VERSION:-}" ] || exit 22; body="{\"serverVersion\":\"$FAKE_SERVER_VERSION\"}" ;;
-  */releases/download/*) file="$HOME/releases/${url#*/releases/download/}"; [ -f "$file" ] || exit 22 ;;
+  */releases/download/*)
+    if [[ "$url" == */SHA256SUMS ]] && [ -n "${FAKE_SUMS_STATUS:-}" ]; then
+      $write_code && { printf '%s' "$FAKE_SUMS_STATUS"; exit 0; }
+      exit 22
+    fi
+    file="$HOME/releases/${url#*/releases/download/}"
+    if [ ! -f "$file" ]; then
+      $write_code && { printf '404'; exit 0; }
+      exit 22
+    fi ;;
   *) exit 6 ;;
 esac
 $head && exit 0
@@ -77,6 +89,8 @@ if [ -n "$file" ]; then
 elif [ -n "$out" ]; then printf '%s' "$body" > "$out"
 else printf '%s\n' "$body"
 fi
+$write_code && printf '200'
+exit 0
 EOF
   chmod +x "$T"/stub/*
   export PATH="$T/stub:$BASE_PATH"
@@ -86,7 +100,7 @@ EOF
   MENU="$T/.config/omarchy/extensions/omarchy-menu.jsonc"
   widget '{}'
   unset FAKE_VERSION FAKE_WAIT FAKE_CHOICE FAKE_LOGIN_RC FAKE_LOGIN_SLEEP FAKE_START_FAIL \
-    FAKE_LATEST FAKE_CURL_FAIL FAKE_SERVER_VERSION FAKE_STDERR FAKE_STATUS_FAIL FAKE_STATUS_SLEEP VARLATCH_SERVER
+    FAKE_LATEST FAKE_CURL_FAIL FAKE_SUMS_STATUS FAKE_SERVER_VERSION FAKE_STDERR FAKE_STATUS_FAIL FAKE_STATUS_SLEEP VARLATCH_SERVER
 }
 
 # The widget's entry in shell.json: the fake CLI plus the given settings.
@@ -124,14 +138,35 @@ wait_for() { # <jq filter on login.json>
   return 1
 }
 
-make_release() { # <version>: a release CLI stand-in and its SHA256SUMS
+# A release of the TypeScript CLI: a stand-in for its single file, which can
+# update itself, and its SHA256SUMS.
+make_release() { # <version>
   local d="$T/releases/v$1"
   mkdir -p "$d"
-  printf '#!/usr/bin/env node\n// Varlatch CLI (test stand-in)\nif (process.argv[2] === "--version") console.log("varlatch %s (migration 0)");\nelse console.log("Usage: varlatch <command>");\n' \
-    "$1" > "$d/varlatch-cli-$1.cjs"
+  cat > "$d/varlatch-cli-$1.cjs" <<EOF
+#!/usr/bin/env node
+/*! Varlatch CLI. Copyright 2026 Robotsson. (test stand-in) */
+const [command, version] = process.argv.slice(2);
+if (command === "--version") console.log("varlatch $1 (migration 0)");
+else if (command === "self-update") require("fs").appendFileSync(process.env.HOME + "/calls.log", "typescript self-update " + version + "\\n");
+else console.log("Usage: varlatch <command>\\n  varlatch self-update");
+EOF
   (cd "$d" && sha256sum "varlatch-cli-$1.cjs" > SHA256SUMS)
 }
 
+# A release with native programs, as from 0.50: no single file, SHA256SUMS
+# signed. The stand-in "breaks" where its flags say (tests/fake-native.c).
+case "$(uname -m)" in x86_64 | amd64) ARCH=amd64 ;; *) ARCH=arm64 ;; esac
+make_native_release() { # <version> [cc flag...]
+  local d="$T/releases/v$1" version=$1; shift
+  mkdir -p "$d"
+  cc -o "$d/varlatch-$version-linux-$ARCH" -DVERSION="\"$version\"" "$@" "$ROOT/tests/fake-native.c" || exit 1
+  echo '{}' > "$d/SHA256SUMS.sigstore.json"
+  (cd "$d" && sha256sum "varlatch-$version-linux-$ARCH" > SHA256SUMS
+    printf '%064d  varlatch-%s-darwin-arm64\n' 0 "$version" >> SHA256SUMS)
+}
+
+is_typescript_cli() { head -n 2 "$1" | grep -q 'Varlatch CLI'; }
 calls() { cat "$T/calls.log" 2>/dev/null; }
 
 # --------------------------------------------------------------------------
@@ -397,6 +432,12 @@ cache 0.14.3 $((now - 7200)) $((now - 100));      check "same, but tried 2m ago:
 cache 0.15.0 $((now - 100)) $((now - 100));       check "--force: checks" "asks --force"
 jq -n --argjson c $((now - 50000)) '{latest: "0.15.0", checkedAt: $c, notified: ""}' > "$U"
 check "an older cache without attemptedAt" "asks"
+cache 0.50.0 $((now - 100)) $((now - 100))
+check "a prerelease CLI is offered its release" \
+  "FAKE_VERSION=0.50.0-rc.3 \"\$H\" version-info | jq -e '.updateAvailable and .latest == \"0.50.0\"' >/dev/null"
+cache 0.23.0 $((now - 100)) $((now - 100))
+check "a prerelease CLI newer than the latest release: no update" \
+  "FAKE_VERSION=0.50.0-rc.3 \"\$H\" version-info | jq -e '.updateAvailable == false' >/dev/null"
 cache 0.15.0 $((now - 50000)) $((now - 50000))
 FAKE_CURL_FAIL=1 "$H" version-info >/dev/null
 check "a failed check keeps the cache and records the attempt" \
@@ -431,16 +472,231 @@ printf '\ny\n' | FAKE_LATEST=9.9.9 "$H" install-cli > "$T/out" 2>&1; rc=$?
 check "checksum mismatch: nothing installed" \
   "[ $rc -ne 0 ] && grep -q 'does not match SHA256SUMS' '$T/out' && [ ! -e '$T/.local/bin/varlatch' ]"
 
+
 new_home; make_release 9.9.8; make_release 9.9.9
 mkdir -p "$T/bin"; install -m 755 "$T/releases/v9.9.8/varlatch-cli-9.9.8.cjs" "$T/bin/varlatch"
 widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+FAKE_LATEST=9.9.9 "$H" upgrade-cli > "$T/out" 2>&1
+check "to a release with the single file: the CLI updates itself" \
+  "calls | grep -qx 'typescript self-update 9.9.9'" "$(cat "$T/out")"
+sed -i 's/self-update/nothing/' "$T/bin/varlatch"
 printf 'y\n' | FAKE_LATEST=9.9.9 "$H" upgrade-cli > "$T/out" 2>&1
-check "update replaces a release install" "\"\$T/bin/varlatch\" --version | grep -q 9.9.9" "$(cat "$T/out")"
+check "a CLI without self-update is replaced here" "\"\$T/bin/varlatch\" --version | grep -q 9.9.9" "$(cat "$T/out")"
 FAKE_LATEST=9.9.9 "$H" upgrade-cli > "$T/out" 2>&1
 check "already the latest: up to date" "grep -q 'varlatch 9.9.9 is up to date.' '$T/out'"
+
+section "native releases (install-cli, upgrade-cli)"
+NATIVE_VERSION='varlatch 10.0.0'
+# No node on PATH: a native release needs none.
+no_node() {
+  mkdir -p "$T/nonode"
+  local c
+  for c in bash env sh cat chmod cp cut date dirname git grep head id install jq ln ls mkdir mktemp mv \
+      python3 readlink rm rmdir sed seq setsid sha256sum sleep sort stat tail tee tr uname wc flock kill basename; do
+    ln -sf "$(command -v $c)" "$T/nonode/$c"
+  done
+  PATH="$T/stub:$T/nonode"
+}
+typescript_cli() { # <path>: 9.9.8, the TypeScript CLI, with a sign-in
+  make_release 9.9.8; mkdir -p "$(dirname "$1")" "$T/.config/varlatch"
+  install -m 755 "$T/releases/v9.9.8/varlatch-cli-9.9.8.cjs" "$1"
+  echo '{"servers":{}}' > "$T/.config/varlatch/credentials.json"
+}
+leftovers() { find "$1" -name '.varlatch-*'; }
+
+new_home; widget_default_cli '{}'; make_native_release 10.0.0
+printf '\ny\n' | (no_node; FAKE_LATEST=10.0.0 "$H" install-cli) > "$T/out" 2>&1; rc=$?
+check "the latest release is native: installed, without Node.js" \
+  "[ $rc -eq 0 ] && [ \"\$(\"\$T/.local/bin/varlatch\" --version)\" = '$NATIVE_VERSION' ]" "$(cat "$T/out")"
+check "the native program checked the release's signature (bootstrap wording without cosign)" \
+  "calls | grep -q 'native verify-release --version 10.0.0 --sums .*/SHA256SUMS --bundle .*/SHA256SUMS.sigstore.json --file .*=varlatch-10.0.0-linux-$ARCH' && grep -q 'checked by the downloaded binary (install cosign for an independent check)' '$T/out'" "$(cat "$T/out")"
+new_home; widget_default_cli '{}'; make_release 9.9.8; make_native_release 10.0.0
+printf 'vl.example.com\ny\nn\n' | FAKE_SERVER_VERSION=9.9.8 FAKE_LATEST=10.0.0 "$H" install-cli > "$T/out" 2>&1
+check "a server of the TypeScript generation: its single file" \
+  "\"\$T/.local/bin/varlatch\" --version | grep -q 9.9.8" "$(cat "$T/out")"
+new_home; widget_default_cli '{}'; make_release 9.9.8; make_native_release 10.0.0
+printf 'vl.example.com\ny\nn\n' | FAKE_SERVER_VERSION=10.0.0 FAKE_LATEST=9.9.8 "$H" install-cli > "$T/out" 2>&1
+check "a native server while the latest release is not: its program" \
+  "[ \"\$(\"\$T/.local/bin/varlatch\" --version)\" = '$NATIVE_VERSION' ]" "$(cat "$T/out")"
+new_home; widget_default_cli '{}'; make_release 9.9.8; make_native_release 10.0.0-rc.1
+printf 'vl.example.com\ny\nn\n' | FAKE_SERVER_VERSION=10.0.0-rc.1 FAKE_LATEST=9.9.8 "$H" install-cli > "$T/out" 2>&1
+check "a server on a prerelease: that prerelease" \
+  "[ \"\$(\"\$T/.local/bin/varlatch\" --version)\" = 'varlatch 10.0.0-rc.1' ]" "$(cat "$T/out")"
+
+refused() { # <label> <message>: an install of 10.0.0 that must not happen
+  printf '\ny\n' | FAKE_LATEST=10.0.0 "$H" install-cli > "$T/out" 2>&1; rc=$?
+  check "$1" "[ $rc -ne 0 ] && grep -q '$2' '$T/out' && [ ! -e '$T/.local/bin/varlatch' ]" "$(cat "$T/out")"
+}
+new_home; widget_default_cli '{}'; make_native_release 10.0.0
+SUMS="$T/releases/v10.0.0/SHA256SUMS"
+sed -i -E "s/^[0-9a-f]{64}(  .*-linux-)/$(printf '%064d' 0)\\1/" "$SUMS"
+refused "checksum mismatch: nothing installed" 'does not match SHA256SUMS'
+check "a program that does not match is never run" "! calls | grep -q '^native'"
+new_home; widget_default_cli '{}'; make_native_release 10.0.0
+SUMS="$T/releases/v10.0.0/SHA256SUMS"; sed -i '/-linux-/d' "$SUMS"
+refused "not listed in SHA256SUMS: nothing installed" 'has no CLI for this machine'
+make_native_release 10.0.0; grep -e -linux- "$SUMS" | tee -a "$SUMS" >/dev/null
+refused "listed twice: nothing installed" 'has no CLI for this machine'
+rm "$SUMS"
+refused "no SHA256SUMS: nothing installed" 'has no SHA256SUMS'
+new_home; widget_default_cli '{}'; make_native_release 10.0.0; rm "$T/releases/v10.0.0/SHA256SUMS.sigstore.json"
+refused "an unsigned native release: nothing installed" 'carries no signature'
+new_home; widget_default_cli '{}'; make_native_release 10.0.0 -DBAD_SIGNATURE
+refused "a signature that does not verify: nothing installed" 'does NOT verify'
+new_home; widget_default_cli '{}'; make_native_release 10.0.0 -DREPORTS='"9.0.0"'
+refused "a program of another version: nothing installed" 'reports version "9.0.0"'
+new_home; widget_default_cli '{}'; make_native_release 10.0.0
+printf '#!/bin/sh\necho riscv64\n' > "$T/stub/uname"; chmod +x "$T/stub/uname"
+refused "a machine without a program: nothing installed" 'no CLI for this machine (riscv64)'
+new_home; widget_default_cli '{}'; make_native_release 10.0.0 -DBREAKS_IN_PLACE
+refused "a program that does not run in its place is removed again" 'it was removed again'
+check "nothing is left behind" "[ -z \"\$(leftovers '$T/.local/bin')\" ]" "$(leftovers "$T/.local/bin")"
+
+new_home; make_native_release 10.0.0; typescript_cli "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+printf 'n\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1; rc=$?
+check "update to a native release, declined: the CLI stays" \
+  "[ $rc -eq 130 ] && is_typescript_cli '$T/bin/varlatch'" "$(cat "$T/out")"
+printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1; rc=$?
+check "update to a native release: replaces the TypeScript CLI" \
+  "[ $rc -eq 0 ] && [ \"\$(\"\$T/bin/varlatch\" --version)\" = '$NATIVE_VERSION' ]" "$(cat "$T/out")"
+check "its self-update, which would refuse, is not run" "! calls | grep -q 'typescript self-update'"
+check "the sign-ins are left alone" "[ \"\$(cat '$T/.config/varlatch/credentials.json')\" = '{\"servers\":{}}' ]"
+check "no copy of the old CLI is left" "[ \"\$(ls -A '$T/bin')\" = varlatch ]" "$(ls -A "$T/bin")"
+check "a native CLI counts as a release install" "\"\$H\" version-info | jq -e '.install == \"release\" and .current == \"10.0.0\"' >/dev/null"
+: > "$T/calls.log"; "$H" upgrade-cli 10.0.1 > "$T/out" 2>&1
+check "a native CLI updates itself, not through node" "calls | grep -qx 'native self-update 10.0.1'" "$(calls)"
+
+new_home; make_native_release 10.0.0 -DBREAKS_IN_PLACE; typescript_cli "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1; rc=$?
+check "the new one does not run in its place: the TypeScript CLI is back" \
+  "[ $rc -ne 0 ] && grep -q 'the one that was there is back' '$T/out' && \"\$T/bin/varlatch\" --version | grep -q 9.9.8 && [ \"\$(ls -A '$T/bin')\" = varlatch ]" "$(cat "$T/out")"
+mkdir "$T/opt"; mv "$T/bin/varlatch" "$T/opt/varlatch.cjs"; ln -s ../opt/varlatch.cjs "$T/bin/varlatch"
+printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1
+check "through a symlink: the link is back" \
+  "[ \"\$(readlink '$T/bin/varlatch')\" = ../opt/varlatch.cjs ] && \"\$T/bin/varlatch\" --version | grep -q 9.9.8" "$(cat "$T/out")"
+new_home; make_native_release 10.0.0; typescript_cli "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+sed -i -E "s/^[0-9a-f]{64}(  .*-linux-)/$(printf '%064d' 0)\\1/" "$T/releases/v10.0.0/SHA256SUMS"
+printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1; rc=$?
+check "update, checksum mismatch: the CLI stays" \
+  "[ $rc -ne 0 ] && grep -q 'does not match SHA256SUMS' '$T/out' && \"\$T/bin/varlatch\" --version | grep -q 9.9.8"
+
+new_home; make_native_release 10.0.0; typescript_cli "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"; mkdir "$T/compose"; touch "$T/compose/docker-compose.yml"
+printf 'y\n' | VARLATCH_COMPOSE_DIR="$T/compose" FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1
+check "on a Compose host: the TypeScript CLI stays, as varlatch-ts" \
+  "[ \"\$(\"\$T/bin/varlatch\" --version)\" = '$NATIVE_VERSION' ] && \"\$T/bin/varlatch-ts\" --version | grep -q 9.9.8" "$(cat "$T/out")"
+new_home; make_native_release 10.0.0; typescript_cli "$T/bin/varlatch"; echo mine > "$T/bin/varlatch-ts"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"; mkdir "$T/compose"; touch "$T/compose/varlatch-install.json"
+printf 'y\n' | VARLATCH_COMPOSE_DIR="$T/compose" FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1; rc=$?
+check "on a Compose host: another varlatch-ts is never replaced" \
+  "[ $rc -ne 0 ] && [ \"\$(cat '$T/bin/varlatch-ts')\" = mine ] && \"\$T/bin/varlatch\" --version | grep -q 9.9.8" "$(cat "$T/out")"
+
+new_home; make_native_release 10.0.0
+mkdir -p "$T/linuxbrew/Cellar/varlatch/10.0.0/bin" "$T/linuxbrew/bin"
+cp "$T/releases/v10.0.0/varlatch-10.0.0-linux-$ARCH" "$T/linuxbrew/Cellar/varlatch/10.0.0/bin/varlatch"
+ln -s ../Cellar/varlatch/10.0.0/bin/varlatch "$T/linuxbrew/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/linuxbrew/bin/varlatch\"}"
+"$H" upgrade-cli 10.0.1 > "$T/out" 2>&1; rc=$?
+check "Homebrew's copy is Homebrew's to update" \
+  "[ $rc -ne 0 ] && grep -q 'brew upgrade varlatch' '$T/out' && ! calls | grep -q self-update" "$(cat "$T/out")"
+: > "$T/calls.log"; "$H" notify-update 10.0.0 10.0.1 homebrew
+check "its notification names brew, without an Update button" \
+  "calls | grep -q 'brew upgrade varlatch' && ! calls | grep -q -- '-A update='" "$(calls)"
+new_home; make_native_release 10.0.0-dev
+mkdir "$T/bin"; cp "$T/releases/v10.0.0-dev/varlatch-10.0.0-dev-linux-$ARCH" "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+check "a native development build is updated by hand" "\"\$H\" version-info | jq -e '.install == \"custom\"' >/dev/null"
+
 widget '{}'
 "$H" upgrade-cli > "$T/out" 2>&1
 check "a source checkout is updated by hand" "grep -q 'built from a source checkout' '$T/out'" "$(cat "$T/out")"
+
+section "security and hardening (review fixes)"
+new_home; widget '{"checkUpdates": "on"}'
+now=$(date +%s)
+jq -n --argjson c $((now - 50000)) --argjson a $((now - 50000)) '{latest: "0.15.0", checkedAt: $c, attemptedAt: $a, notified: ""}' > "$U"
+FAKE_LATEST='0.50.0;touch /tmp/should-not-run' "$H" version-info > "$T/vout" 2>&1
+check "hostile GitHub release tag is rejected and never cached" \
+  "jq -e '.latest == \"0.15.0\" and .updateAvailable == false' '$T/vout' >/dev/null" "$(cat "$T/vout")"
+jq -n --argjson c "$now" --argjson a "$now" '{latest: "0.99.0$(id)", checkedAt: $c, attemptedAt: $a, notified: ""}' > "$U"
+"$H" version-info > "$T/vout" 2>&1
+check "hostile cached version in update.json is ignored on read" \
+  "jq -e '.latest == \"\" and .updateAvailable == false' '$T/vout' >/dev/null" "$(cat "$T/vout")"
+"$H" notify-update 0.15.0 '0.50.0;id' release > "$T/out" 2>&1; rc=$?
+check "notify-update rejects a hostile version" "[ $rc -ne 0 ]"
+: > "$T/calls.log"; FAKE_CHOICE=update "$H" notify-update 0.15.0 0.50.0 release > "$T/out" 2>&1
+check "notify-update shell-quotes helper path and version" \
+  "calls | grep -Fq \"'$H' upgrade-cli '0.50.0'\"" "$(calls)"
+"$H" upgrade-cli '0.50.0;id' > "$T/out" 2>&1; rc=$?
+check "upgrade-cli rejects a hostile version argument" "[ $rc -ne 0 ] && grep -q 'invalid version' '$T/out'" "$(cat "$T/out")"
+
+new_home; make_native_release 10.0.0 -DBREAKS_WHEN_STAGED; typescript_cli "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1; rc=$?
+check "a binary that fails staged launch-test never touches the CLI" \
+  "[ $rc -ne 0 ] && grep -q 'staged CLI does not run' '$T/out' && \"\$T/bin/varlatch\" --version | grep -q 9.9.8 && [ -z \"\$(leftovers '$T/bin')\" ]" "$(cat "$T/out")"
+
+new_home; make_native_release 10.0.0; typescript_cli "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+lock_key=$(printf '%s/varlatch' "$(cd "$T/bin" && pwd -P)" | sha256sum | cut -d' ' -f1)
+(
+  exec 9>"$S/install-$lock_key.lock"
+  flock -x 9
+  printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1
+  echo $? > "$T/lock.rc"
+)
+rc=$(cat "$T/lock.rc")
+check "a held per-target flock refuses the replacement (and releases automatically)" \
+  "[ $rc -ne 0 ] && grep -q 'another install or update is running' '$T/out' && \"\$T/bin/varlatch\" --version | grep -q 9.9.8" "$(cat "$T/out")"
+# After lock holder exits, a follow-up update succeeds with no stale lock.
+printf 'y\n' | FAKE_LATEST=10.0.0 "$H" upgrade-cli > "$T/out" 2>&1; rc=$?
+check "after the lock holder exits, no stale lock blocks the update" \
+  "[ $rc -eq 0 ] && [ \"\$(\"\$T/bin/varlatch\" --version)\" = '$NATIVE_VERSION' ]" "$(cat "$T/out")"
+
+new_home; mkdir -p "$T/bin"
+printf '#!/bin/sh\n# installed with Homebrew\necho "varlatch 0.23.0"\n' > "$T/bin/varlatch"
+chmod +x "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+"$H" upgrade-cli 10.0.0 > "$T/out" 2>&1; rc=$?
+check "legacy Homebrew wrapper marker in #! script is recognized as Homebrew" \
+  "[ $rc -ne 0 ] && grep -q 'brew upgrade varlatch' '$T/out'" "$(cat "$T/out")"
+
+# Native binary containing the string "installed with Homebrew" is NOT misclassified.
+new_home; make_native_release 10.0.0
+mkdir -p "$T/bin"; cp "$T/releases/v10.0.0/varlatch-10.0.0-linux-$ARCH" "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+check "native ELF containing Homebrew string is still classified as release" \
+  "\"\$H\" version-info | jq -e '.install == \"release\"' >/dev/null"
+
+# P1 sudo: non-root unwritable directory refuses sudo and prints manual command.
+new_home; make_native_release 10.0.0
+mkdir -p "$T/ro"; cp "$T/releases/v10.0.0/varlatch-10.0.0-linux-$ARCH" "$T/ro/varlatch"
+chmod 555 "$T/ro"
+widget "{\"varlatchCommand\": \"$T/ro/varlatch\"}"
+"$H" upgrade-cli 10.0.1 > "$T/out" 2>&1; rc=$?
+chmod 755 "$T/ro"
+check "native self-update refuses sudo on non-root unwritable dir and prints manual command" \
+  "[ $rc -ne 0 ] && grep -q 'refusing to run sudo' '$T/out' && grep -Fq \"'$T/ro/varlatch' self-update '10.0.1'\" '$T/out'" "$(cat "$T/out")"
+
+# P3 path with spaces: existing literal path is recognized as release, not custom.
+new_home; make_native_release 10.0.0
+mkdir -p "$T/my tools"; cp "$T/releases/v10.0.0/varlatch-10.0.0-linux-$ARCH" "$T/my tools/varlatch"
+widget "{\"varlatchCommand\": \"$T/my tools/varlatch\"}"
+check "existing literal CLI path with spaces is recognized as release" \
+  "\"\$H\" version-info | jq -e '.install == \"release\" and .current == \"10.0.0\"' >/dev/null"
+
+new_home; widget_default_cli '{}'; make_release 9.9.9
+printf 'vl.example.com\ny\nn\n' | FAKE_SERVER_VERSION=9.9.8 FAKE_SUMS_STATUS=500 FAKE_LATEST=9.9.9 "$H" install-cli > "$T/out" 2>&1; rc=$?
+check "install-cli treats a failed manifest fetch as a failure, not no release CLI" \
+  "[ $rc -ne 0 ] && grep -q 'could not fetch SHA256SUMS' '$T/out' && ! grep -q 'has no release CLI' '$T/out' && [ ! -e '$T/.local/bin/varlatch' ]" "$(cat "$T/out")"
+new_home; make_release 9.9.9; typescript_cli "$T/bin/varlatch"
+widget "{\"varlatchCommand\": \"$T/bin/varlatch\"}"
+FAKE_SUMS_STATUS=500 "$H" upgrade-cli 9.9.9 > "$T/out" 2>&1; rc=$?
+check "upgrade-cli treats a failed manifest fetch as a failure" \
+  "[ $rc -ne 0 ] && grep -q 'could not fetch SHA256SUMS' '$T/out' && \"\$T/bin/varlatch\" --version | grep -q 9.9.8" "$(cat "$T/out")"
 
 echo
 echo "$passed passed, $failed failed"
